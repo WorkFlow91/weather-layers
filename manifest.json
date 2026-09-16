@@ -1,0 +1,13 @@
+{
+  "name": "Weather Layers",
+  "version": "0.1.0",
+  "manifest_version": 1,
+  "description": "Manage click-through weather and atmosphere overlays.",
+  "action": {
+    "title": "Weather Layers",
+    "icon": "/icon.svg",
+    "popover": "/",
+    "height": 520,
+    "width": 360
+  }
+}
