@@ -1,202 +1,416 @@
-import OBR, { Item } from "@owlbear-rodeo/sdk";
+import OBR, { Image, isImage } from "@owlbear-rodeo/sdk";
 import "./style.css";
 
-const METADATA_KEY = "weather-layers/overlay";
+const METADATA_KEY = "weather-layers/weather";
+
+type WeatherType = "NONE" | "RAIN" | "STORM" | "FOG";
 
 type WeatherMetadata = {
+  type: WeatherType;
   enabled: boolean;
+  intensity: number;
 };
 
-function isWeatherLayer(item: Item): boolean {
-  const metadata = item.metadata[METADATA_KEY] as WeatherMetadata | undefined;
-  return metadata?.enabled === true;
+type SortMode =
+  | "NAME_ASC"
+  | "NAME_DESC"
+  | "ACTIVE_FIRST"
+  | "INACTIVE_FIRST";
+
+let sortMode: SortMode = "NAME_ASC";
+
+function getWeather(item: Image): WeatherMetadata {
+  const metadata = item.metadata[METADATA_KEY] as
+    | WeatherMetadata
+    | undefined;
+
+  return (
+    metadata ?? {
+      type: "NONE",
+      enabled: false,
+      intensity: 0.6,
+    }
+  );
 }
 
-function getDisplayName(item: Item): string {
-  if (item.name && item.name.trim().length > 0) {
-    return item.name;
+function getMapName(item: Image): string {
+  const name = item.name?.trim();
+
+  if (name) {
+    return name;
   }
 
-  return "Unnamed Weather Layer";
+  return "Unnamed Map";
 }
 
-async function getWeatherLayers(): Promise<Item[]> {
-  const items = await OBR.scene.items.getItems();
+async function getMaps(): Promise<Image[]> {
+  const maps = await OBR.scene.items.getItems(
+    (item): item is Image =>
+      item.layer === "MAP" && isImage(item)
+  );
 
-  return items.filter(isWeatherLayer);
+  return sortMaps(maps);
 }
 
-async function addSelectedItems(): Promise<void> {
-  const selection = await OBR.player.getSelection();
+function sortMaps(maps: Image[]): Image[] {
+  const result = [...maps];
 
-  if (!selection || selection.length === 0) {
-    await OBR.notification.show("Select one or more items first.", "WARNING");
-    return;
-  }
+  result.sort((a, b) => {
+    const weatherA = getWeather(a);
+    const weatherB = getWeather(b);
 
-  await OBR.scene.items.updateItems(selection, (items) => {
+    switch (sortMode) {
+      case "NAME_DESC":
+        return getMapName(b).localeCompare(getMapName(a));
+
+      case "ACTIVE_FIRST": {
+        const activeDifference =
+          Number(weatherB.enabled) - Number(weatherA.enabled);
+
+        if (activeDifference !== 0) {
+          return activeDifference;
+        }
+
+        return getMapName(a).localeCompare(getMapName(b));
+      }
+
+      case "INACTIVE_FIRST": {
+        const activeDifference =
+          Number(weatherA.enabled) - Number(weatherB.enabled);
+
+        if (activeDifference !== 0) {
+          return activeDifference;
+        }
+
+        return getMapName(a).localeCompare(getMapName(b));
+      }
+
+      case "NAME_ASC":
+      default:
+        return getMapName(a).localeCompare(getMapName(b));
+    }
+  });
+
+  return result;
+}
+
+async function setWeatherType(
+  mapId: string,
+  type: WeatherType
+): Promise<void> {
+  await OBR.scene.items.updateItems([mapId], (items) => {
     for (const item of items) {
-      item.locked = true;
-      item.disableHit = true;
+      const previous =
+        (item.metadata[METADATA_KEY] as
+          | WeatherMetadata
+          | undefined) ?? {
+          type: "NONE",
+          enabled: false,
+          intensity: 0.6,
+        };
 
       item.metadata[METADATA_KEY] = {
-        enabled: true,
+        ...previous,
+        type,
+        enabled: type !== "NONE",
       };
     }
   });
-
-  await OBR.notification.show(
-    `${selection.length} item${selection.length === 1 ? "" : "s"} added to Weather Layers.`,
-    "SUCCESS"
-  );
-
-  await render();
 }
 
-async function removeWeatherLayer(id: string): Promise<void> {
-  await OBR.scene.items.updateItems([id], (items) => {
+async function toggleWeather(mapId: string): Promise<void> {
+  await OBR.scene.items.updateItems([mapId], (items) => {
     for (const item of items) {
-      item.locked = false;
-      item.disableHit = false;
+      const previous =
+        (item.metadata[METADATA_KEY] as
+          | WeatherMetadata
+          | undefined) ?? {
+          type: "NONE",
+          enabled: false,
+          intensity: 0.6,
+        };
 
-      delete item.metadata[METADATA_KEY];
+      item.metadata[METADATA_KEY] = {
+        ...previous,
+        enabled:
+          previous.type === "NONE"
+            ? false
+            : !previous.enabled,
+      };
     }
   });
-
-  await render();
 }
 
-async function toggleVisibility(id: string): Promise<void> {
-  const matchingItems = await OBR.scene.items.getItems([id]);
+async function setIntensity(
+  mapId: string,
+  intensity: number
+): Promise<void> {
+  await OBR.scene.items.updateItems([mapId], (items) => {
+    for (const item of items) {
+      const previous =
+        (item.metadata[METADATA_KEY] as
+          | WeatherMetadata
+          | undefined) ?? {
+          type: "NONE",
+          enabled: false,
+          intensity: 0.6,
+        };
 
-  if (matchingItems.length === 0) {
-    return;
+      item.metadata[METADATA_KEY] = {
+        ...previous,
+        intensity,
+      };
+    }
+  });
+}
+
+function createMapCard(map: Image): HTMLElement {
+  const weather = getWeather(map);
+
+  const card = document.createElement("article");
+  card.className = "map-card";
+
+  if (weather.enabled) {
+    card.classList.add("weather-active");
   }
 
-  const currentVisibility = matchingItems[0].visible;
+  const top = document.createElement("div");
+  top.className = "map-top";
 
-  await OBR.scene.items.updateItems([id], (items) => {
-    for (const item of items) {
-      item.visible = !currentVisibility;
-    }
+  const mapInfo = document.createElement("div");
+  mapInfo.className = "map-info";
+
+  const icon = document.createElement("div");
+  icon.className = "map-icon";
+  icon.textContent = "▧";
+
+  const text = document.createElement("div");
+  text.className = "map-text";
+
+  const name = document.createElement("div");
+  name.className = "map-name";
+  name.textContent = getMapName(map);
+  name.title = getMapName(map);
+
+  const state = document.createElement("div");
+  state.className = "map-state";
+
+  if (weather.type === "NONE") {
+    state.textContent = "No weather";
+  } else if (weather.enabled) {
+    state.textContent = `${weather.type.toLowerCase()} active`;
+  } else {
+    state.textContent = `${weather.type.toLowerCase()} disabled`;
+  }
+
+  text.append(name, state);
+  mapInfo.append(icon, text);
+
+  const toggle = document.createElement("button");
+  toggle.className = "toggle-button";
+  toggle.disabled = weather.type === "NONE";
+  toggle.textContent = weather.enabled ? "On" : "Off";
+
+  if (weather.enabled) {
+    toggle.classList.add("active");
+  }
+
+  toggle.addEventListener("click", async () => {
+    await toggleWeather(map.id);
   });
 
-  await render();
-}
-
-function createLayerRow(item: Item): HTMLElement {
-  const row = document.createElement("div");
-  row.className = "layer-row";
-
-  const nameArea = document.createElement("div");
-  nameArea.className = "layer-name-area";
-
-  const icon = document.createElement("span");
-  icon.className = "layer-icon";
-  icon.textContent = "☁";
-
-  const name = document.createElement("span");
-  name.className = "layer-name";
-  name.textContent = getDisplayName(item);
-  name.title = getDisplayName(item);
-
-  nameArea.append(icon, name);
+  top.append(mapInfo, toggle);
 
   const controls = document.createElement("div");
-  controls.className = "layer-controls";
+  controls.className = "map-controls";
 
-  const visibilityButton = document.createElement("button");
-  visibilityButton.className = "icon-button";
-  visibilityButton.title = item.visible ? "Hide layer" : "Show layer";
-  visibilityButton.setAttribute(
-    "aria-label",
-    item.visible ? "Hide layer" : "Show layer"
+  const weatherSelect = document.createElement("select");
+  weatherSelect.className = "weather-select";
+
+  const options: Array<{
+    value: WeatherType;
+    label: string;
+  }> = [
+    { value: "NONE", label: "No weather" },
+    { value: "RAIN", label: "Rain" },
+    { value: "STORM", label: "Storm" },
+    { value: "FOG", label: "Fog" },
+  ];
+
+  for (const optionData of options) {
+    const option = document.createElement("option");
+    option.value = optionData.value;
+    option.textContent = optionData.label;
+
+    if (weather.type === optionData.value) {
+      option.selected = true;
+    }
+
+    weatherSelect.appendChild(option);
+  }
+
+  weatherSelect.addEventListener("change", async () => {
+    await setWeatherType(
+      map.id,
+      weatherSelect.value as WeatherType
+    );
+  });
+
+  const intensityRow = document.createElement("div");
+  intensityRow.className = "intensity-row";
+
+  const intensityHeader = document.createElement("div");
+  intensityHeader.className = "intensity-header";
+
+  const intensityLabel = document.createElement("span");
+  intensityLabel.textContent = "Intensity";
+
+  const intensityValue = document.createElement("span");
+  intensityValue.className = "intensity-value";
+  intensityValue.textContent = `${Math.round(
+    weather.intensity * 100
+  )}%`;
+
+  intensityHeader.append(intensityLabel, intensityValue);
+
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = "0";
+  slider.max = "100";
+  slider.step = "5";
+  slider.value = String(
+    Math.round(weather.intensity * 100)
   );
 
-  visibilityButton.textContent = item.visible ? "👁" : "◌";
+  slider.disabled = weather.type === "NONE";
 
-  visibilityButton.addEventListener("click", async () => {
-    await toggleVisibility(item.id);
+  slider.addEventListener("input", () => {
+    intensityValue.textContent = `${slider.value}%`;
   });
 
-  const removeButton = document.createElement("button");
-  removeButton.className = "icon-button remove-button";
-  removeButton.title = "Remove from Weather Layers";
-  removeButton.setAttribute("aria-label", "Remove from Weather Layers");
-  removeButton.textContent = "×";
-
-  removeButton.addEventListener("click", async () => {
-    await removeWeatherLayer(item.id);
+  slider.addEventListener("change", async () => {
+    await setIntensity(
+      map.id,
+      Number(slider.value) / 100
+    );
   });
 
-  controls.append(visibilityButton, removeButton);
+  intensityRow.append(intensityHeader, slider);
+  controls.append(weatherSelect, intensityRow);
 
-  row.append(nameArea, controls);
+  card.append(top, controls);
 
-  return row;
+  return card;
 }
 
 async function render(): Promise<void> {
-  const root = document.querySelector<HTMLDivElement>("#app");
+  const root =
+    document.querySelector<HTMLDivElement>("#app");
 
   if (!root) {
     return;
   }
 
-  const weatherLayers = await getWeatherLayers();
+  const maps = await getMaps();
 
   root.innerHTML = `
     <main class="panel">
       <header class="header">
         <div>
           <h1>Weather Layers</h1>
-          <p class="subtitle">Click-through overlays</p>
+          <p class="subtitle">
+            Map-based weather effects
+          </p>
         </div>
       </header>
 
-      <section class="layers-section">
-        <div class="section-title">
-          <span>Layers</span>
-          <span class="layer-count">${weatherLayers.length}</span>
+      <div class="toolbar">
+        <div>
+          <div class="section-label">
+            Maps in scene
+          </div>
+          <div class="map-count">
+            ${maps.length}
+            ${maps.length === 1 ? "map" : "maps"}
+          </div>
         </div>
 
-        <div id="layer-list" class="layer-list"></div>
+        <select
+          id="sort-select"
+          class="sort-select"
+          aria-label="Sort maps"
+        >
+          <option value="NAME_ASC">
+            Name A–Z
+          </option>
+          <option value="NAME_DESC">
+            Name Z–A
+          </option>
+          <option value="ACTIVE_FIRST">
+            Active first
+          </option>
+          <option value="INACTIVE_FIRST">
+            Inactive first
+          </option>
+        </select>
+      </div>
 
-        ${
-          weatherLayers.length === 0
-            ? `
-              <div class="empty-state">
-                <div class="empty-icon">☁</div>
-                <p>No weather layers yet.</p>
-                <span>Select an image on the canvas and add it below.</span>
-              </div>
-            `
-            : ""
-        }
-      </section>
+      <section
+        id="map-list"
+        class="map-list"
+      ></section>
+
+      ${
+        maps.length === 0
+          ? `
+            <div class="empty-state">
+              <div class="empty-icon">▧</div>
+              <p>No map images found.</p>
+              <span>
+                Add an image to Owlbear's Map
+                layer and it will appear here.
+              </span>
+            </div>
+          `
+          : ""
+      }
 
       <footer class="footer">
-        <button id="add-selected" class="primary-button">
-          <span class="button-plus">+</span>
-          Add Selected
-        </button>
+        Weather choices are stored now.
+        Rendering comes next.
       </footer>
     </main>
   `;
 
-  const list = document.querySelector<HTMLDivElement>("#layer-list");
+  const sortSelect =
+    document.querySelector<HTMLSelectElement>(
+      "#sort-select"
+    );
 
-  if (list) {
-    for (const item of weatherLayers) {
-      list.appendChild(createLayerRow(item));
-    }
+  if (sortSelect) {
+    sortSelect.value = sortMode;
+
+    sortSelect.addEventListener(
+      "change",
+      async () => {
+        sortMode =
+          sortSelect.value as SortMode;
+
+        await render();
+      }
+    );
   }
 
-  const addButton = document.querySelector<HTMLButtonElement>("#add-selected");
+  const list =
+    document.querySelector<HTMLDivElement>(
+      "#map-list"
+    );
 
-  addButton?.addEventListener("click", async () => {
-    await addSelectedItems();
-  });
+  if (list) {
+    for (const map of maps) {
+      list.appendChild(createMapCard(map));
+    }
+  }
 }
 
 OBR.onReady(async () => {
@@ -204,5 +418,11 @@ OBR.onReady(async () => {
 
   OBR.scene.items.onChange(async () => {
     await render();
+  });
+
+  OBR.scene.onReadyChange(async (ready) => {
+    if (ready) {
+      await render();
+    }
   });
 });
