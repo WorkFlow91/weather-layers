@@ -1,7 +1,14 @@
-import OBR, { Image, isImage } from "@owlbear-rodeo/sdk";
+import OBR, {
+  Image,
+  buildEffect,
+  isImage,
+} from "@owlbear-rodeo/sdk";
+
 import "./style.css";
 
 const METADATA_KEY = "weather-layers/weather";
+const LOCAL_EFFECT_KEY =
+  "weather-layers/local-effect";
 
 type WeatherEffectType =
   | "CLOUDS"
@@ -17,13 +24,21 @@ type EffectSettings = {
 
 type WeatherMetadata = {
   version: 2;
-  effects: Partial<Record<WeatherEffectType, EffectSettings>>;
+  effects: Partial<
+    Record<WeatherEffectType, EffectSettings>
+  >;
 };
 
 type LegacyWeatherMetadata = {
   type?: "NONE" | "RAIN" | "STORM" | "FOG";
   enabled?: boolean;
   intensity?: number;
+};
+
+type LocalEffectMetadata = {
+  mapId: string;
+  effectType: WeatherEffectType;
+  intensity: number;
 };
 
 type SortMode =
@@ -66,11 +81,214 @@ const EFFECTS: Array<{
 
 let sortMode: SortMode = "NAME_ASC";
 
-/*
- * Expansion is deliberately local UI state.
- * It is not stored in Owlbear metadata.
- */
 const expandedMaps = new Set<string>();
+
+/*
+ * First real post-processing shader.
+ *
+ * This samples the already-rendered scene and adds animated
+ * vertical rain streaks on top.
+ *
+ * intensity is passed from our UI as a custom uniform.
+ */
+const RAIN_SHADER = `
+uniform shader scene;
+
+uniform vec2 size;
+uniform float time;
+uniform mat3 modelView;
+
+uniform float intensity;
+
+float hash(float n) {
+  return fract(sin(n * 91.3458) * 47453.5453);
+}
+
+float rainLayer(
+  vec2 uv,
+  float columns,
+  float speed,
+  float seed
+) {
+  float x = uv.x * columns;
+
+  float column = floor(x);
+  float columnPosition = fract(x);
+
+  float randomA =
+    hash(column + seed);
+
+  float randomB =
+    hash(column * 3.17 + seed);
+
+  /*
+   * Slightly offset each streak within its column.
+   */
+  float center =
+    0.2 + randomA * 0.6;
+
+  float horizontalDistance =
+    abs(columnPosition - center);
+
+  /*
+   * Thin vertical streak.
+   */
+  float width =
+    mix(
+      0.035,
+      0.012,
+      randomB
+    );
+
+  float line =
+    1.0 -
+    smoothstep(
+      width,
+      width * 2.5,
+      horizontalDistance
+    );
+
+  /*
+   * Repeating segments travelling downward.
+   */
+  float y =
+    uv.y * 8.0
+    - time *
+      speed *
+      (0.75 + randomA * 0.7)
+    + randomB * 10.0;
+
+  float segment =
+    fract(y);
+
+  /*
+   * Long streak followed by empty space.
+   */
+  float streak =
+    1.0 -
+    smoothstep(
+      0.20,
+      0.48,
+      abs(segment - 0.5)
+    );
+
+  /*
+   * Some columns get suppressed, avoiding
+   * an overly uniform curtain of rain.
+   */
+  float visibility =
+    step(
+      0.28,
+      hash(column * 5.91 + seed)
+    );
+
+  return line * streak * visibility;
+}
+
+half4 main(float2 coord) {
+  /*
+   * Convert local effect coordinates into screen-space
+   * coordinates so we can sample the scene beneath.
+   */
+  vec2 sceneCoord =
+    (vec3(coord, 1.0) * modelView).xy;
+
+  half4 base =
+    scene.eval(sceneCoord);
+
+  vec2 uv =
+    coord / size;
+
+  /*
+   * Correct horizontal density for very wide maps.
+   */
+  float aspect =
+    size.x /
+    max(size.y, 1.0);
+
+  vec2 rainUv = uv;
+
+  rainUv.x *= aspect;
+
+  /*
+   * Multiple layers make the motion feel less mechanical.
+   */
+  float rainA =
+    rainLayer(
+      rainUv,
+      38.0,
+      1.8,
+      1.0
+    );
+
+  float rainB =
+    rainLayer(
+      rainUv + vec2(0.13, 0.0),
+      55.0,
+      2.5,
+      19.0
+    );
+
+  float rainC =
+    rainLayer(
+      rainUv + vec2(0.31, 0.0),
+      75.0,
+      3.2,
+      47.0
+    );
+
+  float rain =
+    rainA * 0.55 +
+    rainB * 0.35 +
+    rainC * 0.20;
+
+  /*
+   * Intensity affects both density/visibility and brightness.
+   */
+  rain *=
+    mix(
+      0.25,
+      1.15,
+      intensity
+    );
+
+  rain =
+    clamp(
+      rain,
+      0.0,
+      1.0
+    );
+
+  half3 rainColor =
+    half3(
+      0.72,
+      0.82,
+      0.92
+    );
+
+  half rainAlpha =
+    half(
+      rain *
+      mix(
+        0.18,
+        0.65,
+        intensity
+      )
+    );
+
+  half3 result =
+    mix(
+      base.rgb,
+      rainColor,
+      rainAlpha
+    );
+
+  return half4(
+    result,
+    base.a
+  );
+}
+`;
 
 function getDefaultEffectSettings(): EffectSettings {
   return {
@@ -79,12 +297,11 @@ function getDefaultEffectSettings(): EffectSettings {
   };
 }
 
-/*
- * Converts our old single-weather format to the new
- * multiple-effects structure automatically.
- */
-function getWeather(item: Image): WeatherMetadata {
-  const raw = item.metadata[METADATA_KEY];
+function getWeather(
+  item: Image
+): WeatherMetadata {
+  const raw =
+    item.metadata[METADATA_KEY];
 
   if (
     raw &&
@@ -95,17 +312,24 @@ function getWeather(item: Image): WeatherMetadata {
     return raw as WeatherMetadata;
   }
 
-  const legacy = raw as LegacyWeatherMetadata | undefined;
+  const legacy =
+    raw as LegacyWeatherMetadata | undefined;
 
-  const effects: WeatherMetadata["effects"] = {};
+  const effects:
+    WeatherMetadata["effects"] = {};
 
-  if (legacy?.type && legacy.type !== "NONE") {
+  if (
+    legacy?.type &&
+    legacy.type !== "NONE"
+  ) {
     const intensity =
-      typeof legacy.intensity === "number"
+      typeof legacy.intensity ===
+      "number"
         ? legacy.intensity
         : 0.6;
 
-    const enabled = legacy.enabled ?? true;
+    const enabled =
+      legacy.enabled ?? true;
 
     if (legacy.type === "RAIN") {
       effects.RAIN = {
@@ -121,10 +345,6 @@ function getWeather(item: Image): WeatherMetadata {
       };
     }
 
-    /*
-     * Old "Storm" becomes clouds + rain.
-     * Lightning can then be enabled separately.
-     */
     if (legacy.type === "STORM") {
       effects.CLOUDS = {
         enabled,
@@ -154,8 +374,11 @@ function getEffectSettings(
   );
 }
 
-function getMapName(item: Image): string {
-  const name = item.name?.trim();
+function getMapName(
+  item: Image
+): string {
+  const name =
+    item.name?.trim();
 
   return name || "Unnamed Map";
 }
@@ -173,80 +396,112 @@ function getActiveEffects(
     .map(({ type }) => type);
 }
 
-function hasActiveWeather(item: Image): boolean {
-  return getActiveEffects(getWeather(item)).length > 0;
+function hasActiveWeather(
+  item: Image
+): boolean {
+  return (
+    getActiveEffects(
+      getWeather(item)
+    ).length > 0
+  );
 }
 
-function getWeatherSummary(item: Image): string {
-  const weather = getWeather(item);
-  const active = getActiveEffects(weather);
+function getWeatherSummary(
+  item: Image
+): string {
+  const weather =
+    getWeather(item);
+
+  const active =
+    getActiveEffects(weather);
 
   if (active.length === 0) {
     return "No active effects";
   }
 
-  const labels = active.map((type) => {
-    return (
-      EFFECTS.find(
-        (effect) => effect.type === type
-      )?.label ?? type
-    );
-  });
+  const labels =
+    active.map((type) => {
+      return (
+        EFFECTS.find(
+          (effect) =>
+            effect.type === type
+        )?.label ?? type
+      );
+    });
 
   return labels.join(", ");
 }
 
-async function getMaps(): Promise<Image[]> {
-  const maps = await OBR.scene.items.getItems(
-    (item): item is Image =>
-      item.layer === "MAP" && isImage(item)
-  );
+async function getMaps(): Promise<
+  Image[]
+> {
+  const maps =
+    await OBR.scene.items.getItems(
+      (item): item is Image =>
+        item.layer === "MAP" &&
+        isImage(item)
+    );
 
   return sortMaps(maps);
 }
 
-function sortMaps(maps: Image[]): Image[] {
+function sortMaps(
+  maps: Image[]
+): Image[] {
   const result = [...maps];
 
   result.sort((a, b) => {
-    const activeA = hasActiveWeather(a);
-    const activeB = hasActiveWeather(b);
+    const activeA =
+      hasActiveWeather(a);
+
+    const activeB =
+      hasActiveWeather(b);
 
     switch (sortMode) {
       case "NAME_DESC":
-        return getMapName(b).localeCompare(
+        return getMapName(
+          b
+        ).localeCompare(
           getMapName(a)
         );
 
       case "ACTIVE_FIRST": {
         const difference =
-          Number(activeB) - Number(activeA);
+          Number(activeB) -
+          Number(activeA);
 
         if (difference !== 0) {
           return difference;
         }
 
-        return getMapName(a).localeCompare(
+        return getMapName(
+          a
+        ).localeCompare(
           getMapName(b)
         );
       }
 
       case "INACTIVE_FIRST": {
         const difference =
-          Number(activeA) - Number(activeB);
+          Number(activeA) -
+          Number(activeB);
 
         if (difference !== 0) {
           return difference;
         }
 
-        return getMapName(a).localeCompare(
+        return getMapName(
+          a
+        ).localeCompare(
           getMapName(b)
         );
       }
 
       case "NAME_ASC":
       default:
-        return getMapName(a).localeCompare(
+        return getMapName(
+          a
+        ).localeCompare(
           getMapName(b)
         );
     }
@@ -268,14 +523,17 @@ async function updateEffect(
           continue;
         }
 
-        const weather = getWeather(item);
+        const weather =
+          getWeather(item);
 
-        const previous = getEffectSettings(
-          weather,
-          type
-        );
+        const previous =
+          getEffectSettings(
+            weather,
+            type
+          );
 
-        const nextWeather: WeatherMetadata = {
+        const nextWeather:
+          WeatherMetadata = {
           version: 2,
           effects: {
             ...weather.effects,
@@ -298,7 +556,9 @@ async function toggleEffect(
   type: WeatherEffectType
 ): Promise<void> {
   const items =
-    await OBR.scene.items.getItems([mapId]);
+    await OBR.scene.items.getItems(
+      [mapId]
+    );
 
   if (items.length === 0) {
     return;
@@ -310,16 +570,23 @@ async function toggleEffect(
     return;
   }
 
-  const weather = getWeather(item);
+  const weather =
+    getWeather(item);
 
-  const settings = getEffectSettings(
-    weather,
-    type
+  const settings =
+    getEffectSettings(
+      weather,
+      type
+    );
+
+  await updateEffect(
+    mapId,
+    type,
+    {
+      enabled:
+        !settings.enabled,
+    }
   );
-
-  await updateEffect(mapId, type, {
-    enabled: !settings.enabled,
-  });
 }
 
 async function setIntensity(
@@ -327,9 +594,191 @@ async function setIntensity(
   type: WeatherEffectType,
   intensity: number
 ): Promise<void> {
-  await updateEffect(mapId, type, {
-    intensity,
-  });
+  await updateEffect(
+    mapId,
+    type,
+    {
+      intensity,
+    }
+  );
+}
+
+/*
+ * -----------------------------
+ * LOCAL POST-PROCESS MANAGEMENT
+ * -----------------------------
+ *
+ * Effects are local-only in Owlbear, so every client creates
+ * its own Effect item from the shared map metadata.
+ *
+ * Owlbear documents Effect items as experimental and local-only.
+ */
+async function syncRainEffects(
+  maps: Image[]
+): Promise<void> {
+  const localEffects =
+    await OBR.scene.local.getItems(
+      (item) =>
+        item.type === "EFFECT" &&
+        Boolean(
+          item.metadata[
+            LOCAL_EFFECT_KEY
+          ]
+        )
+    );
+
+  const rainByMap =
+    new Map<
+      string,
+      {
+        id: string;
+        intensity: number;
+      }
+    >();
+
+  /*
+   * Find Rain Effects that this extension already created.
+   */
+  for (
+    const item of localEffects
+  ) {
+    const metadata =
+      item.metadata[
+        LOCAL_EFFECT_KEY
+      ] as
+        | LocalEffectMetadata
+        | undefined;
+
+    if (
+      !metadata ||
+      metadata.effectType !==
+        "RAIN"
+    ) {
+      continue;
+    }
+
+    rainByMap.set(
+      metadata.mapId,
+      {
+        id: item.id,
+        intensity:
+          metadata.intensity,
+      }
+    );
+  }
+
+  const wantedMapIds =
+    new Set<string>();
+
+  for (const map of maps) {
+    const weather =
+      getWeather(map);
+
+    const rain =
+      getEffectSettings(
+        weather,
+        "RAIN"
+      );
+
+    if (!rain.enabled) {
+      continue;
+    }
+
+    wantedMapIds.add(map.id);
+
+    const existing =
+      rainByMap.get(map.id);
+
+    /*
+     * If the existing Effect already has the correct
+     * intensity, leave it alone.
+     */
+    if (
+      existing &&
+      Math.abs(
+        existing.intensity -
+          rain.intensity
+      ) < 0.001
+    ) {
+      continue;
+    }
+
+    /*
+     * Intensity changed:
+     * remove the old local shader and recreate it.
+     *
+     * For our first test this keeps the synchronization
+     * logic simple and predictable.
+     */
+    if (existing) {
+      await OBR.scene.local.deleteItems(
+        [existing.id]
+      );
+    }
+
+    const effect =
+      buildEffect()
+        .name(
+          `Weather Layers: Rain`
+        )
+        .effectType(
+          "ATTACHMENT"
+        )
+        .attachedTo(map.id)
+        .layer(
+          "POST_PROCESS"
+        )
+        .locked(true)
+        .disableHit(true)
+        .metadata({
+          [LOCAL_EFFECT_KEY]: {
+            mapId: map.id,
+            effectType:
+              "RAIN",
+            intensity:
+              rain.intensity,
+          } satisfies LocalEffectMetadata,
+        })
+        .uniforms([
+          {
+            name: "intensity",
+            value:
+              rain.intensity,
+          },
+        ])
+        .sksl(RAIN_SHADER)
+        .build();
+
+    await OBR.scene.local.addItems(
+      [effect]
+    );
+  }
+
+  /*
+   * Remove rain effects whose source map no longer
+   * has Rain enabled.
+   */
+  for (
+    const [
+      mapId,
+      local,
+    ] of rainByMap
+  ) {
+    if (
+      !wantedMapIds.has(mapId)
+    ) {
+      await OBR.scene.local.deleteItems(
+        [local.id]
+      );
+    }
+  }
+}
+
+async function syncWeatherRendering(): Promise<void> {
+  const maps =
+    await getMaps();
+
+  await syncRainEffects(maps);
 }
 
 function createEffectControl(
@@ -338,29 +787,41 @@ function createEffectControl(
   label: string,
   icon: string
 ): HTMLElement {
-  const weather = getWeather(map);
+  const weather =
+    getWeather(map);
 
-  const settings = getEffectSettings(
-    weather,
-    type
-  );
+  const settings =
+    getEffectSettings(
+      weather,
+      type
+    );
 
   const wrapper =
-    document.createElement("div");
+    document.createElement(
+      "div"
+    );
 
-  wrapper.className = "effect-wrapper";
+  wrapper.className =
+    "effect-wrapper";
 
   if (settings.enabled) {
-    wrapper.classList.add("effect-enabled");
+    wrapper.classList.add(
+      "effect-enabled"
+    );
   }
 
   const button =
-    document.createElement("button");
+    document.createElement(
+      "button"
+    );
 
-  button.className = "effect-button";
+  button.className =
+    "effect-button";
 
   if (settings.enabled) {
-    button.classList.add("active");
+    button.classList.add(
+      "active"
+    );
   }
 
   button.type = "button";
@@ -371,24 +832,39 @@ function createEffectControl(
   );
 
   const effectIcon =
-    document.createElement("span");
+    document.createElement(
+      "span"
+    );
 
-  effectIcon.className = "effect-icon";
-  effectIcon.textContent = icon;
+  effectIcon.className =
+    "effect-icon";
+
+  effectIcon.textContent =
+    icon;
 
   const effectName =
-    document.createElement("span");
+    document.createElement(
+      "span"
+    );
 
-  effectName.className = "effect-name";
-  effectName.textContent = label;
+  effectName.className =
+    "effect-name";
+
+  effectName.textContent =
+    label;
 
   const check =
-    document.createElement("span");
+    document.createElement(
+      "span"
+    );
 
-  check.className = "effect-check";
-  check.textContent = settings.enabled
-    ? "✓"
-    : "";
+  check.className =
+    "effect-check";
+
+  check.textContent =
+    settings.enabled
+      ? "✓"
+      : "";
 
   button.append(
     effectIcon,
@@ -399,7 +875,10 @@ function createEffectControl(
   button.addEventListener(
     "click",
     async () => {
-      await toggleEffect(map.id, type);
+      await toggleEffect(
+        map.id,
+        type
+      );
     }
   );
 
@@ -407,25 +886,33 @@ function createEffectControl(
 
   if (settings.enabled) {
     const intensityRow =
-      document.createElement("div");
+      document.createElement(
+        "div"
+      );
 
     intensityRow.className =
       "effect-intensity";
 
     const intensityHeader =
-      document.createElement("div");
+      document.createElement(
+        "div"
+      );
 
     intensityHeader.className =
       "intensity-header";
 
     const intensityLabel =
-      document.createElement("span");
+      document.createElement(
+        "span"
+      );
 
     intensityLabel.textContent =
       "Intensity";
 
     const intensityValue =
-      document.createElement("span");
+      document.createElement(
+        "span"
+      );
 
     intensityValue.className =
       "intensity-value";
@@ -441,23 +928,23 @@ function createEffectControl(
     );
 
     const slider =
-      document.createElement("input");
+      document.createElement(
+        "input"
+      );
 
     slider.type = "range";
     slider.min = "0";
     slider.max = "100";
     slider.step = "5";
 
-    slider.value = String(
-      Math.round(
-        settings.intensity * 100
-      )
-    );
+    slider.value =
+      String(
+        Math.round(
+          settings.intensity *
+            100
+        )
+      );
 
-    /*
-     * Update the number immediately while dragging.
-     * We only write to Owlbear when the drag ends.
-     */
     slider.addEventListener(
       "input",
       () => {
@@ -472,7 +959,9 @@ function createEffectControl(
         await setIntensity(
           map.id,
           type,
-          Number(slider.value) / 100
+          Number(
+            slider.value
+          ) / 100
         );
       }
     );
@@ -482,7 +971,9 @@ function createEffectControl(
       slider
     );
 
-    wrapper.appendChild(intensityRow);
+    wrapper.appendChild(
+      intensityRow
+    );
   }
 
   return wrapper;
@@ -491,7 +982,8 @@ function createEffectControl(
 function createMapCard(
   map: Image
 ): HTMLElement {
-  const weather = getWeather(map);
+  const weather =
+    getWeather(map);
 
   const activeEffects =
     getActiveEffects(weather);
@@ -503,9 +995,12 @@ function createMapCard(
     expandedMaps.has(map.id);
 
   const card =
-    document.createElement("article");
+    document.createElement(
+      "article"
+    );
 
-  card.className = "map-card";
+  card.className =
+    "map-card";
 
   if (active) {
     card.classList.add(
@@ -514,13 +1009,19 @@ function createMapCard(
   }
 
   if (expanded) {
-    card.classList.add("expanded");
+    card.classList.add(
+      "expanded"
+    );
   }
 
   const header =
-    document.createElement("button");
+    document.createElement(
+      "button"
+    );
 
-  header.className = "map-header";
+  header.className =
+    "map-header";
+
   header.type = "button";
 
   header.setAttribute(
@@ -529,42 +1030,71 @@ function createMapCard(
   );
 
   const chevron =
-    document.createElement("span");
+    document.createElement(
+      "span"
+    );
 
-  chevron.className = "chevron";
-  chevron.textContent = expanded
-    ? "▾"
-    : "▸";
+  chevron.className =
+    "chevron";
+
+  chevron.textContent =
+    expanded
+      ? "▾"
+      : "▸";
 
   const mapIcon =
-    document.createElement("span");
+    document.createElement(
+      "span"
+    );
 
-  mapIcon.className = "map-icon";
-  mapIcon.textContent = "▧";
+  mapIcon.className =
+    "map-icon";
+
+  mapIcon.textContent =
+    "▧";
 
   const text =
-    document.createElement("div");
+    document.createElement(
+      "div"
+    );
 
-  text.className = "map-text";
+  text.className =
+    "map-text";
 
   const name =
-    document.createElement("div");
+    document.createElement(
+      "div"
+    );
 
-  name.className = "map-name";
-  name.textContent = getMapName(map);
-  name.title = getMapName(map);
+  name.className =
+    "map-name";
+
+  name.textContent =
+    getMapName(map);
+
+  name.title =
+    getMapName(map);
 
   const summary =
-    document.createElement("div");
+    document.createElement(
+      "div"
+    );
 
-  summary.className = "map-state";
+  summary.className =
+    "map-state";
+
   summary.textContent =
     getWeatherSummary(map);
 
-  text.append(name, summary);
+  text.append(
+    name,
+    summary
+  );
 
   const badge =
-    document.createElement("span");
+    document.createElement(
+      "span"
+    );
 
   badge.className =
     activeEffects.length > 0
@@ -572,7 +1102,9 @@ function createMapCard(
       : "effect-count";
 
   badge.textContent =
-    String(activeEffects.length);
+    String(
+      activeEffects.length
+    );
 
   header.append(
     chevron,
@@ -584,10 +1116,18 @@ function createMapCard(
   header.addEventListener(
     "click",
     async () => {
-      if (expandedMaps.has(map.id)) {
-        expandedMaps.delete(map.id);
+      if (
+        expandedMaps.has(
+          map.id
+        )
+      ) {
+        expandedMaps.delete(
+          map.id
+        );
       } else {
-        expandedMaps.add(map.id);
+        expandedMaps.add(
+          map.id
+        );
       }
 
       await render();
@@ -598,23 +1138,35 @@ function createMapCard(
 
   if (expanded) {
     const body =
-      document.createElement("div");
+      document.createElement(
+        "div"
+      );
 
-    body.className = "map-body";
+    body.className =
+      "map-body";
 
     const label =
-      document.createElement("div");
+      document.createElement(
+        "div"
+      );
 
-    label.className = "effects-label";
+    label.className =
+      "effects-label";
+
     label.textContent =
       "Weather effects";
 
     const effects =
-      document.createElement("div");
+      document.createElement(
+        "div"
+      );
 
-    effects.className = "effects-list";
+    effects.className =
+      "effects-list";
 
-    for (const effect of EFFECTS) {
+    for (
+      const effect of EFFECTS
+    ) {
       effects.appendChild(
         createEffectControl(
           map,
@@ -625,7 +1177,10 @@ function createMapCard(
       );
     }
 
-    body.append(label, effects);
+    body.append(
+      label,
+      effects
+    );
 
     card.appendChild(body);
   }
@@ -643,13 +1198,17 @@ async function render(): Promise<void> {
     return;
   }
 
-  const maps = await getMaps();
+  const maps =
+    await getMaps();
 
   root.innerHTML = `
     <main class="panel">
       <header class="header">
         <div>
-          <h1>Weather Layers</h1>
+          <h1>
+            Weather Layers
+          </h1>
+
           <p class="subtitle">
             Map-based weather effects
           </p>
@@ -664,9 +1223,11 @@ async function render(): Promise<void> {
 
           <div class="map-count">
             ${maps.length}
-            ${maps.length === 1
-              ? "map"
-              : "maps"}
+            ${
+              maps.length === 1
+                ? "map"
+                : "maps"
+            }
           </div>
         </div>
 
@@ -706,12 +1267,15 @@ async function render(): Promise<void> {
                 ▧
               </div>
 
-              <p>No map images found.</p>
+              <p>
+                No map images found.
+              </p>
 
               <span>
-                Add an image to Owlbear's
-                Map layer and it will
-                appear here.
+                Add an image to
+                Owlbear's Map layer
+                and it will appear
+                here.
               </span>
             </div>
           `
@@ -719,8 +1283,9 @@ async function render(): Promise<void> {
       }
 
       <footer class="footer">
-        Weather settings are stored.
-        Rendering comes next.
+        Rain rendering enabled.
+        Other effects are still
+        placeholders.
       </footer>
     </main>
   `;
@@ -731,7 +1296,8 @@ async function render(): Promise<void> {
     );
 
   if (sortSelect) {
-    sortSelect.value = sortMode;
+    sortSelect.value =
+      sortMode;
 
     sortSelect.addEventListener(
       "change",
@@ -750,7 +1316,9 @@ async function render(): Promise<void> {
     );
 
   if (list) {
-    for (const map of maps) {
+    for (
+      const map of maps
+    ) {
       list.appendChild(
         createMapCard(map)
       );
@@ -758,19 +1326,24 @@ async function render(): Promise<void> {
   }
 }
 
-OBR.onReady(async () => {
+async function refreshEverything(): Promise<void> {
+  await syncWeatherRendering();
   await render();
+}
+
+OBR.onReady(async () => {
+  await refreshEverything();
 
   OBR.scene.items.onChange(
     async () => {
-      await render();
+      await refreshEverything();
     }
   );
 
   OBR.scene.onReadyChange(
     async (ready) => {
       if (ready) {
-        await render();
+        await refreshEverything();
       }
     }
   );
