@@ -1,14 +1,23 @@
 import OBR, {
-  Image,
-  buildEffect,
+  buildImage,
   isImage,
+} from "@owlbear-rodeo/sdk";
+
+import type {
+  Image,
+  ImageDownload,
 } from "@owlbear-rodeo/sdk";
 
 import "./style.css";
 
-const METADATA_KEY = "weather-layers/weather";
-const LOCAL_EFFECT_KEY =
-  "weather-layers/local-effect";
+const WEATHER_KEY =
+  "weather-layers/weather";
+
+const ASSET_LIBRARY_KEY =
+  "weather-layers/assets";
+
+const OVERLAY_KEY =
+  "weather-layers/overlay";
 
 type WeatherEffectType =
   | "CLOUDS"
@@ -19,26 +28,59 @@ type WeatherEffectType =
 
 type EffectSettings = {
   enabled: boolean;
-  intensity: number;
 };
 
 type WeatherMetadata = {
-  version: 2;
+  version: 3;
   effects: Partial<
-    Record<WeatherEffectType, EffectSettings>
+    Record<
+      WeatherEffectType,
+      EffectSettings
+    >
   >;
 };
 
-type LegacyWeatherMetadata = {
-  type?: "NONE" | "RAIN" | "STORM" | "FOG";
+type OldWeatherMetadata = {
+  version?: number;
+  effects?: Partial<
+    Record<
+      WeatherEffectType,
+      {
+        enabled?: boolean;
+        intensity?: number;
+      }
+    >
+  >;
+  type?:
+    | "NONE"
+    | "RAIN"
+    | "STORM"
+    | "FOG";
   enabled?: boolean;
   intensity?: number;
 };
 
-type LocalEffectMetadata = {
+type StoredAsset = {
+  name: string;
+
+  image: ImageDownload["image"];
+  grid: ImageDownload["grid"];
+};
+
+type AssetLibrary = Partial<
+  Record<
+    WeatherEffectType,
+    StoredAsset
+  >
+>;
+
+type OverlayMetadata = {
+  version: 1;
   mapId: string;
   effectType: WeatherEffectType;
-  intensity: number;
+
+  assetUrl: string;
+  mapImageUrl: string;
 };
 
 type SortMode =
@@ -79,287 +121,105 @@ const EFFECTS: Array<{
   },
 ];
 
-let sortMode: SortMode = "NAME_ASC";
+let sortMode: SortMode =
+  "NAME_ASC";
 
-const expandedMaps = new Set<string>();
+const expandedMaps =
+  new Set<string>();
+
+let assetsExpanded = true;
 
 /*
- * First real post-processing shader.
- *
- * This samples the already-rendered scene and adds animated
- * vertical rain streaks on top.
- *
- * intensity is passed from our UI as a custom uniform.
+ * Prevent scene-change events caused by our own
+ * synchronization from starting overlapping refreshes.
  */
-const RAIN_SHADER = `
-uniform shader scene;
+let refreshing = false;
+let refreshAgain = false;
 
-uniform vec2 size;
-uniform float time;
-uniform mat3 modelView;
 
-uniform float intensity;
-
-float hash(float n) {
-  return fract(sin(n * 91.3458) * 47453.5453);
-}
-
-float rainLayer(
-  vec2 uv,
-  float columns,
-  float speed,
-  float seed
-) {
-  float x = uv.x * columns;
-
-  float column = floor(x);
-  float columnPosition = fract(x);
-
-  float randomA =
-    hash(column + seed);
-
-  float randomB =
-    hash(column * 3.17 + seed);
-
-  /*
-   * Slightly offset each streak within its column.
-   */
-  float center =
-    0.2 + randomA * 0.6;
-
-  float horizontalDistance =
-    abs(columnPosition - center);
-
-  /*
-   * Thin vertical streak.
-   */
-  float width =
-    mix(
-      0.035,
-      0.012,
-      randomB
-    );
-
-  float line =
-    1.0 -
-    smoothstep(
-      width,
-      width * 2.5,
-      horizontalDistance
-    );
-
-  /*
-   * Repeating segments travelling downward.
-   */
-  float y =
-    uv.y * 8.0
-    - time *
-      speed *
-      (0.75 + randomA * 0.7)
-    + randomB * 10.0;
-
-  float segment =
-    fract(y);
-
-  /*
-   * Long streak followed by empty space.
-   */
-  float streak =
-    1.0 -
-    smoothstep(
-      0.20,
-      0.48,
-      abs(segment - 0.5)
-    );
-
-  /*
-   * Some columns get suppressed, avoiding
-   * an overly uniform curtain of rain.
-   */
-  float visibility =
-    step(
-      0.28,
-      hash(column * 5.91 + seed)
-    );
-
-  return line * streak * visibility;
-}
-
-half4 main(float2 coord) {
-  /*
-   * Convert local effect coordinates into screen-space
-   * coordinates so we can sample the scene beneath.
-   */
-  vec2 sceneCoord =
-    (vec3(coord, 1.0) * modelView).xy;
-
-  half4 base =
-    scene.eval(sceneCoord);
-
-  vec2 uv =
-    coord / size;
-
-  /*
-   * Correct horizontal density for very wide maps.
-   */
-  float aspect =
-    size.x /
-    max(size.y, 1.0);
-
-  vec2 rainUv = uv;
-
-  rainUv.x *= aspect;
-
-  /*
-   * Multiple layers make the motion feel less mechanical.
-   */
-  float rainA =
-    rainLayer(
-      rainUv,
-      38.0,
-      1.8,
-      1.0
-    );
-
-  float rainB =
-    rainLayer(
-      rainUv + vec2(0.13, 0.0),
-      55.0,
-      2.5,
-      19.0
-    );
-
-  float rainC =
-    rainLayer(
-      rainUv + vec2(0.31, 0.0),
-      75.0,
-      3.2,
-      47.0
-    );
-
-  float rain =
-    rainA * 0.55 +
-    rainB * 0.35 +
-    rainC * 0.20;
-
-  /*
-   * Intensity affects both density/visibility and brightness.
-   */
-  rain *=
-    mix(
-      0.25,
-      1.15,
-      intensity
-    );
-
-  rain =
-    clamp(
-      rain,
-      0.0,
-      1.0
-    );
-
-  half3 rainColor =
-    half3(
-      0.72,
-      0.82,
-      0.92
-    );
-
-  half rainAlpha =
-    half(
-      rain *
-      mix(
-        0.18,
-        0.65,
-        intensity
-      )
-    );
-
-  half3 result =
-    mix(
-      base.rgb,
-      rainColor,
-      rainAlpha
-    );
-
-  return half4(
-    result,
-    base.a
-  );
-}
-`;
-
-function getDefaultEffectSettings(): EffectSettings {
-  return {
-    enabled: false,
-    intensity: 0.6,
-  };
-}
+/* ---------------------------------
+   WEATHER DATA
+---------------------------------- */
 
 function getWeather(
   item: Image
 ): WeatherMetadata {
   const raw =
-    item.metadata[METADATA_KEY];
+    item.metadata[
+      WEATHER_KEY
+    ] as
+      | OldWeatherMetadata
+      | undefined;
 
   if (
-    raw &&
-    typeof raw === "object" &&
-    "version" in raw &&
-    (raw as WeatherMetadata).version === 2
+    raw?.version === 3 &&
+    raw.effects
   ) {
     return raw as WeatherMetadata;
   }
 
-  const legacy =
-    raw as LegacyWeatherMetadata | undefined;
-
   const effects:
     WeatherMetadata["effects"] = {};
 
+  /*
+   * Migrate our previous multi-effect
+   * format automatically.
+   */
+  if (raw?.effects) {
+    for (const effect of EFFECTS) {
+      const old =
+        raw.effects[
+          effect.type
+        ];
+
+      if (old) {
+        effects[
+          effect.type
+        ] = {
+          enabled:
+            old.enabled ??
+            false,
+        };
+      }
+    }
+  }
+
+  /*
+   * Also support the first,
+   * single-weather version.
+   */
   if (
-    legacy?.type &&
-    legacy.type !== "NONE"
+    raw?.type &&
+    raw.type !== "NONE"
   ) {
-    const intensity =
-      typeof legacy.intensity ===
-      "number"
-        ? legacy.intensity
-        : 0.6;
-
     const enabled =
-      legacy.enabled ?? true;
+      raw.enabled ?? true;
 
-    if (legacy.type === "RAIN") {
+    if (raw.type === "RAIN") {
       effects.RAIN = {
         enabled,
-        intensity,
       };
     }
 
-    if (legacy.type === "FOG") {
+    if (raw.type === "FOG") {
       effects.FOG = {
         enabled,
-        intensity,
       };
     }
 
-    if (legacy.type === "STORM") {
+    if (raw.type === "STORM") {
       effects.CLOUDS = {
         enabled,
-        intensity,
       };
 
       effects.RAIN = {
         enabled,
-        intensity,
       };
     }
   }
 
   return {
-    version: 2,
+    version: 3,
     effects,
   };
 }
@@ -369,72 +229,186 @@ function getEffectSettings(
   type: WeatherEffectType
 ): EffectSettings {
   return (
-    weather.effects[type] ??
-    getDefaultEffectSettings()
+    weather.effects[type] ?? {
+      enabled: false,
+    }
   );
 }
+
+async function setEffectEnabled(
+  mapId: string,
+  type: WeatherEffectType,
+  enabled: boolean
+): Promise<void> {
+  await OBR.scene.items.updateItems(
+    [mapId],
+    (items) => {
+      for (const item of items) {
+        if (!isImage(item)) {
+          continue;
+        }
+
+        const weather =
+          getWeather(item);
+
+        item.metadata[
+          WEATHER_KEY
+        ] = {
+          version: 3,
+
+          effects: {
+            ...weather.effects,
+
+            [type]: {
+              enabled,
+            },
+          },
+        } satisfies WeatherMetadata;
+      }
+    }
+  );
+}
+
+
+/* ---------------------------------
+   WEATHER ASSET LIBRARY
+---------------------------------- */
+
+async function getAssetLibrary():
+  Promise<AssetLibrary> {
+  const metadata =
+    await OBR.scene.getMetadata();
+
+  return (
+    metadata[
+      ASSET_LIBRARY_KEY
+    ] as
+      | AssetLibrary
+      | undefined
+  ) ?? {};
+}
+
+async function chooseAsset(
+  type: WeatherEffectType
+): Promise<void> {
+  /*
+   * This opens Owlbear's native asset picker.
+   *
+   * false = choose one image only.
+   *
+   * We deliberately don't provide a type hint,
+   * so you aren't restricted to images uploaded
+   * specifically as ATTACHMENT assets.
+   */
+  const images =
+    await OBR.assets.downloadImages(
+      false,
+      ""
+    );
+
+  if (images.length === 0) {
+    return;
+  }
+
+  const selected =
+    images[0];
+
+  const library =
+    await getAssetLibrary();
+
+  const updated:
+    AssetLibrary = {
+    ...library,
+
+    [type]: {
+      name: selected.name,
+      image: selected.image,
+      grid: selected.grid,
+    },
+  };
+
+  await OBR.scene.setMetadata({
+    [ASSET_LIBRARY_KEY]:
+      updated,
+  });
+}
+
+async function clearAsset(
+  type: WeatherEffectType
+): Promise<void> {
+  const library =
+    await getAssetLibrary();
+
+  const updated = {
+    ...library,
+  };
+
+  delete updated[type];
+
+  await OBR.scene.setMetadata({
+    [ASSET_LIBRARY_KEY]:
+      updated,
+  });
+}
+
+
+/* ---------------------------------
+   MAP DISCOVERY
+---------------------------------- */
 
 function getMapName(
   item: Image
 ): string {
-  const name =
-    item.name?.trim();
-
-  return name || "Unnamed Map";
+  return (
+    item.name?.trim() ||
+    "Unnamed Map"
+  );
 }
 
 function getActiveEffects(
-  weather: WeatherMetadata
+  item: Image
 ): WeatherEffectType[] {
+  const weather =
+    getWeather(item);
+
   return EFFECTS
-    .filter(({ type }) => {
+    .filter((effect) => {
       return getEffectSettings(
         weather,
-        type
+        effect.type
       ).enabled;
     })
-    .map(({ type }) => type);
-}
-
-function hasActiveWeather(
-  item: Image
-): boolean {
-  return (
-    getActiveEffects(
-      getWeather(item)
-    ).length > 0
-  );
+    .map(
+      (effect) =>
+        effect.type
+    );
 }
 
 function getWeatherSummary(
   item: Image
 ): string {
-  const weather =
-    getWeather(item);
-
   const active =
-    getActiveEffects(weather);
+    getActiveEffects(item);
 
   if (active.length === 0) {
     return "No active effects";
   }
 
-  const labels =
-    active.map((type) => {
+  return active
+    .map((type) => {
       return (
         EFFECTS.find(
           (effect) =>
-            effect.type === type
+            effect.type ===
+            type
         )?.label ?? type
       );
-    });
-
-  return labels.join(", ");
+    })
+    .join(", ");
 }
 
-async function getMaps(): Promise<
-  Image[]
-> {
+async function getMaps():
+  Promise<Image[]> {
   const maps =
     await OBR.scene.items.getItems(
       (item): item is Image =>
@@ -452,10 +426,12 @@ function sortMaps(
 
   result.sort((a, b) => {
     const activeA =
-      hasActiveWeather(a);
+      getActiveEffects(a)
+        .length > 0;
 
     const activeB =
-      hasActiveWeather(b);
+      getActiveEffects(b)
+        .length > 0;
 
     switch (sortMode) {
       case "NAME_DESC":
@@ -510,282 +486,478 @@ function sortMaps(
   return result;
 }
 
-async function updateEffect(
-  mapId: string,
-  type: WeatherEffectType,
-  updates: Partial<EffectSettings>
-): Promise<void> {
-  await OBR.scene.items.updateItems(
-    [mapId],
-    (items) => {
-      for (const item of items) {
-        if (!isImage(item)) {
-          continue;
-        }
 
-        const weather =
-          getWeather(item);
+/* ---------------------------------
+   STATIC OVERLAY SYNCHRONIZATION
+---------------------------------- */
 
-        const previous =
-          getEffectSettings(
-            weather,
-            type
-          );
-
-        const nextWeather:
-          WeatherMetadata = {
-          version: 2,
-          effects: {
-            ...weather.effects,
-            [type]: {
-              ...previous,
-              ...updates,
-            },
-          },
-        };
-
-        item.metadata[METADATA_KEY] =
-          nextWeather;
-      }
-    }
-  );
-}
-
-async function toggleEffect(
+function overlayKey(
   mapId: string,
   type: WeatherEffectType
-): Promise<void> {
-  const items =
-    await OBR.scene.items.getItems(
-      [mapId]
-    );
-
-  if (items.length === 0) {
-    return;
-  }
-
-  const item = items[0];
-
-  if (!isImage(item)) {
-    return;
-  }
-
-  const weather =
-    getWeather(item);
-
-  const settings =
-    getEffectSettings(
-      weather,
-      type
-    );
-
-  await updateEffect(
-    mapId,
-    type,
-    {
-      enabled:
-        !settings.enabled,
-    }
-  );
+): string {
+  return `${mapId}:${type}`;
 }
 
-async function setIntensity(
-  mapId: string,
+function calculateOverlayScale(
+  map: Image,
+  asset: StoredAsset
+) {
+  /*
+   * Fit the selected weather image exactly
+   * to the rendered dimensions of the map.
+   *
+   * This intentionally stretches the weather
+   * image to fill the map.
+   */
+  return {
+    x:
+      map.scale.x *
+      (
+        map.image.width /
+        asset.image.width
+      ),
+
+    y:
+      map.scale.y *
+      (
+        map.image.height /
+        asset.image.height
+      ),
+  };
+}
+
+async function createOverlay(
+  map: Image,
   type: WeatherEffectType,
-  intensity: number
+  asset: StoredAsset
 ): Promise<void> {
-  await updateEffect(
-    mapId,
-    type,
-    {
-      intensity,
-    }
+  const effect =
+    EFFECTS.find(
+      (entry) =>
+        entry.type === type
+    );
+
+  const overlay =
+    buildImage(
+      asset.image,
+      asset.grid
+    )
+      .name(
+        `Weather: ${
+          effect?.label ?? type
+        } — ${getMapName(map)}`
+      )
+
+      /*
+       * Start with the same transform
+       * as the target map.
+       */
+      .position({
+        ...map.position,
+      })
+
+      .rotation(
+        map.rotation
+      )
+
+      .scale(
+        calculateOverlayScale(
+          map,
+          asset
+        )
+      )
+
+      /*
+       * ATTACHMENT causes future movement,
+       * rotation, scaling, visibility and
+       * deletion of the map to propagate
+       * to the overlay.
+       */
+      .layer("ATTACHMENT")
+      .attachedTo(map.id)
+
+      /*
+       * Weather must never intercept
+       * canvas selection.
+       */
+      .locked(true)
+      .disableHit(true)
+
+      .metadata({
+        [OVERLAY_KEY]: {
+          version: 1,
+          mapId: map.id,
+          effectType: type,
+          assetUrl:
+            asset.image.url,
+          mapImageUrl:
+            map.image.url,
+        } satisfies OverlayMetadata,
+      })
+
+      .build();
+
+  await OBR.scene.items.addItems(
+    [overlay]
   );
 }
 
-/*
- * -----------------------------
- * LOCAL POST-PROCESS MANAGEMENT
- * -----------------------------
- *
- * Effects are local-only in Owlbear, so every client creates
- * its own Effect item from the shared map metadata.
- *
- * Owlbear documents Effect items as experimental and local-only.
- */
-async function syncRainEffects(
-  maps: Image[]
-): Promise<void> {
-  const localEffects =
-    await OBR.scene.local.getItems(
+async function syncOverlays():
+  Promise<void> {
+  const maps =
+    await getMaps();
+
+  const library =
+    await getAssetLibrary();
+
+  const overlays =
+    await OBR.scene.items.getItems(
       (item) =>
-        item.type === "EFFECT" &&
         Boolean(
           item.metadata[
-            LOCAL_EFFECT_KEY
+            OVERLAY_KEY
           ]
         )
     );
 
-  const rainByMap =
+  const existing =
     new Map<
       string,
-      {
+      Array<{
         id: string;
-        intensity: number;
-      }
+        metadata:
+          OverlayMetadata;
+      }>
     >();
 
-  /*
-   * Find Rain Effects that this extension already created.
-   */
-  for (
-    const item of localEffects
-  ) {
+  for (const item of overlays) {
     const metadata =
       item.metadata[
-        LOCAL_EFFECT_KEY
+        OVERLAY_KEY
       ] as
-        | LocalEffectMetadata
+        | OverlayMetadata
         | undefined;
 
-    if (
-      !metadata ||
-      metadata.effectType !==
-        "RAIN"
-    ) {
+    if (!metadata) {
       continue;
     }
 
-    rainByMap.set(
-      metadata.mapId,
-      {
-        id: item.id,
-        intensity:
-          metadata.intensity,
-      }
+    const key =
+      overlayKey(
+        metadata.mapId,
+        metadata.effectType
+      );
+
+    const list =
+      existing.get(key) ?? [];
+
+    list.push({
+      id: item.id,
+      metadata,
+    });
+
+    existing.set(
+      key,
+      list
     );
   }
 
-  const wantedMapIds =
+  const wanted =
     new Set<string>();
 
   for (const map of maps) {
     const weather =
       getWeather(map);
 
-    const rain =
-      getEffectSettings(
-        weather,
-        "RAIN"
-      );
-
-    if (!rain.enabled) {
-      continue;
-    }
-
-    wantedMapIds.add(map.id);
-
-    const existing =
-      rainByMap.get(map.id);
-
-    /*
-     * If the existing Effect already has the correct
-     * intensity, leave it alone.
-     */
-    if (
-      existing &&
-      Math.abs(
-        existing.intensity -
-          rain.intensity
-      ) < 0.001
+    for (
+      const effect of EFFECTS
     ) {
-      continue;
-    }
+      const settings =
+        getEffectSettings(
+          weather,
+          effect.type
+        );
 
-    /*
-     * Intensity changed:
-     * remove the old local shader and recreate it.
-     *
-     * For our first test this keeps the synchronization
-     * logic simple and predictable.
-     */
-    if (existing) {
-      await OBR.scene.local.deleteItems(
-        [existing.id]
+      const asset =
+        library[
+          effect.type
+        ];
+
+      /*
+       * If an effect isn't enabled,
+       * or no Owlbear asset has been
+       * assigned to it, it should not
+       * have an overlay.
+       */
+      if (
+        !settings.enabled ||
+        !asset
+      ) {
+        continue;
+      }
+
+      const key =
+        overlayKey(
+          map.id,
+          effect.type
+        );
+
+      wanted.add(key);
+
+      const matches =
+        existing.get(key) ??
+        [];
+
+      const valid =
+        matches.find(
+          (entry) =>
+            entry.metadata
+              .assetUrl ===
+              asset.image.url &&
+            entry.metadata
+              .mapImageUrl ===
+              map.image.url
+        );
+
+      /*
+       * Correct overlay already exists.
+       */
+      if (valid) {
+        /*
+         * Remove accidental duplicates.
+         */
+        const duplicates =
+          matches.filter(
+            (entry) =>
+              entry.id !==
+              valid.id
+          );
+
+        if (
+          duplicates.length > 0
+        ) {
+          await OBR.scene.items
+            .deleteItems(
+              duplicates.map(
+                (entry) =>
+                  entry.id
+              )
+            );
+        }
+
+        continue;
+      }
+
+      /*
+       * Wrong/old asset:
+       * remove it and recreate.
+       */
+      if (
+        matches.length > 0
+      ) {
+        await OBR.scene.items
+          .deleteItems(
+            matches.map(
+              (entry) =>
+                entry.id
+            )
+          );
+      }
+
+      await createOverlay(
+        map,
+        effect.type,
+        asset
       );
     }
-
-    const effect =
-      buildEffect()
-        .name(
-          `Weather Layers: Rain`
-        )
-        .effectType(
-          "ATTACHMENT"
-        )
-        .attachedTo(map.id)
-        .layer(
-          "POST_PROCESS"
-        )
-        .locked(true)
-        .disableHit(true)
-        .metadata({
-          [LOCAL_EFFECT_KEY]: {
-            mapId: map.id,
-            effectType:
-              "RAIN",
-            intensity:
-              rain.intensity,
-          } satisfies LocalEffectMetadata,
-        })
-        .uniforms([
-          {
-            name: "intensity",
-            value:
-              rain.intensity,
-          },
-        ])
-        .sksl(RAIN_SHADER)
-        .build();
-
-    await OBR.scene.local.addItems(
-      [effect]
-    );
   }
 
   /*
-   * Remove rain effects whose source map no longer
-   * has Rain enabled.
+   * Delete overlays that are no
+   * longer wanted at all.
    */
   for (
-    const [
-      mapId,
-      local,
-    ] of rainByMap
+    const [key, items]
+    of existing
   ) {
     if (
-      !wantedMapIds.has(mapId)
+      wanted.has(key)
     ) {
-      await OBR.scene.local.deleteItems(
-        [local.id]
-      );
+      continue;
     }
+
+    await OBR.scene.items
+      .deleteItems(
+        items.map(
+          (item) =>
+            item.id
+        )
+      );
   }
 }
 
-async function syncWeatherRendering(): Promise<void> {
-  const maps =
-    await getMaps();
 
-  await syncRainEffects(maps);
+/* ---------------------------------
+   UI: ASSET LIBRARY
+---------------------------------- */
+
+function createAssetRow(
+  type: WeatherEffectType,
+  label: string,
+  icon: string,
+  asset?: StoredAsset
+): HTMLElement {
+  const row =
+    document.createElement(
+      "div"
+    );
+
+  row.className =
+    "asset-row";
+
+  const info =
+    document.createElement(
+      "div"
+    );
+
+  info.className =
+    "asset-info";
+
+  const assetIcon =
+    document.createElement(
+      "div"
+    );
+
+  assetIcon.className =
+    "asset-icon";
+
+  assetIcon.textContent =
+    icon;
+
+  const text =
+    document.createElement(
+      "div"
+    );
+
+  text.className =
+    "asset-text";
+
+  const title =
+    document.createElement(
+      "div"
+    );
+
+  title.className =
+    "asset-title";
+
+  title.textContent =
+    label;
+
+  const filename =
+    document.createElement(
+      "div"
+    );
+
+  filename.className =
+    asset
+      ? "asset-filename"
+      : "asset-filename missing";
+
+  filename.textContent =
+    asset?.name ??
+    "No asset selected";
+
+  text.append(
+    title,
+    filename
+  );
+
+  info.append(
+    assetIcon,
+    text
+  );
+
+  const controls =
+    document.createElement(
+      "div"
+    );
+
+  controls.className =
+    "asset-controls";
+
+  const choose =
+    document.createElement(
+      "button"
+    );
+
+  choose.className =
+    "small-button";
+
+  choose.type = "button";
+
+  choose.textContent =
+    asset
+      ? "Change"
+      : "Choose";
+
+  choose.addEventListener(
+    "click",
+    async () => {
+      await chooseAsset(type);
+    }
+  );
+
+  controls.appendChild(
+    choose
+  );
+
+  if (asset) {
+    const clear =
+      document.createElement(
+        "button"
+      );
+
+    clear.className =
+      "small-button danger";
+
+    clear.type = "button";
+    clear.title =
+      "Clear asset";
+
+    clear.textContent =
+      "×";
+
+    clear.addEventListener(
+      "click",
+      async () => {
+        await clearAsset(type);
+      }
+    );
+
+    controls.appendChild(
+      clear
+    );
+  }
+
+  row.append(
+    info,
+    controls
+  );
+
+  return row;
 }
+
+
+/* ---------------------------------
+   UI: MAP EFFECTS
+---------------------------------- */
 
 function createEffectControl(
   map: Image,
   type: WeatherEffectType,
   label: string,
-  icon: string
+  icon: string,
+  asset?: StoredAsset
 ): HTMLElement {
   const weather =
     getWeather(map);
@@ -810,6 +982,12 @@ function createEffectControl(
     );
   }
 
+  if (!asset) {
+    wrapper.classList.add(
+      "effect-unavailable"
+    );
+  }
+
   const button =
     document.createElement(
       "button"
@@ -818,18 +996,13 @@ function createEffectControl(
   button.className =
     "effect-button";
 
-  if (settings.enabled) {
-    button.classList.add(
-      "active"
-    );
-  }
-
   button.type = "button";
 
-  button.setAttribute(
-    "aria-pressed",
-    String(settings.enabled)
-  );
+  /*
+   * Don't enable an effect until an
+   * image has been chosen for it.
+   */
+  button.disabled = !asset;
 
   const effectIcon =
     document.createElement(
@@ -842,6 +1015,14 @@ function createEffectControl(
   effectIcon.textContent =
     icon;
 
+  const nameBlock =
+    document.createElement(
+      "span"
+    );
+
+  nameBlock.className =
+    "effect-name-block";
+
   const effectName =
     document.createElement(
       "span"
@@ -852,6 +1033,24 @@ function createEffectControl(
 
   effectName.textContent =
     label;
+
+  const assetName =
+    document.createElement(
+      "span"
+    );
+
+  assetName.className =
+    "effect-asset-name";
+
+  assetName.textContent =
+    asset
+      ? asset.name
+      : "Choose an asset above";
+
+  nameBlock.append(
+    effectName,
+    assetName
+  );
 
   const check =
     document.createElement(
@@ -866,133 +1065,47 @@ function createEffectControl(
       ? "✓"
       : "";
 
+  if (settings.enabled) {
+    button.classList.add(
+      "active"
+    );
+  }
+
   button.append(
     effectIcon,
-    effectName,
+    nameBlock,
     check
   );
 
   button.addEventListener(
     "click",
     async () => {
-      await toggleEffect(
+      await setEffectEnabled(
         map.id,
-        type
+        type,
+        !settings.enabled
       );
     }
   );
 
-  wrapper.appendChild(button);
-
-  if (settings.enabled) {
-    const intensityRow =
-      document.createElement(
-        "div"
-      );
-
-    intensityRow.className =
-      "effect-intensity";
-
-    const intensityHeader =
-      document.createElement(
-        "div"
-      );
-
-    intensityHeader.className =
-      "intensity-header";
-
-    const intensityLabel =
-      document.createElement(
-        "span"
-      );
-
-    intensityLabel.textContent =
-      "Intensity";
-
-    const intensityValue =
-      document.createElement(
-        "span"
-      );
-
-    intensityValue.className =
-      "intensity-value";
-
-    intensityValue.textContent =
-      `${Math.round(
-        settings.intensity * 100
-      )}%`;
-
-    intensityHeader.append(
-      intensityLabel,
-      intensityValue
-    );
-
-    const slider =
-      document.createElement(
-        "input"
-      );
-
-    slider.type = "range";
-    slider.min = "0";
-    slider.max = "100";
-    slider.step = "5";
-
-    slider.value =
-      String(
-        Math.round(
-          settings.intensity *
-            100
-        )
-      );
-
-    slider.addEventListener(
-      "input",
-      () => {
-        intensityValue.textContent =
-          `${slider.value}%`;
-      }
-    );
-
-    slider.addEventListener(
-      "change",
-      async () => {
-        await setIntensity(
-          map.id,
-          type,
-          Number(
-            slider.value
-          ) / 100
-        );
-      }
-    );
-
-    intensityRow.append(
-      intensityHeader,
-      slider
-    );
-
-    wrapper.appendChild(
-      intensityRow
-    );
-  }
+  wrapper.appendChild(
+    button
+  );
 
   return wrapper;
 }
 
 function createMapCard(
-  map: Image
+  map: Image,
+  library: AssetLibrary
 ): HTMLElement {
-  const weather =
-    getWeather(map);
-
   const activeEffects =
-    getActiveEffects(weather);
-
-  const active =
-    activeEffects.length > 0;
+    getActiveEffects(map);
 
   const expanded =
-    expandedMaps.has(map.id);
+    expandedMaps.has(
+      map.id
+    );
 
   const card =
     document.createElement(
@@ -1002,7 +1115,10 @@ function createMapCard(
   card.className =
     "map-card";
 
-  if (active) {
+  if (
+    activeEffects.length >
+    0
+  ) {
     card.classList.add(
       "weather-active"
     );
@@ -1023,11 +1139,6 @@ function createMapCard(
     "map-header";
 
   header.type = "button";
-
-  header.setAttribute(
-    "aria-expanded",
-    String(expanded)
-  );
 
   const chevron =
     document.createElement(
@@ -1070,9 +1181,6 @@ function createMapCard(
     "map-name";
 
   name.textContent =
-    getMapName(map);
-
-  name.title =
     getMapName(map);
 
   const summary =
@@ -1134,7 +1242,9 @@ function createMapCard(
     }
   );
 
-  card.appendChild(header);
+  card.appendChild(
+    header
+  );
 
   if (expanded) {
     const body =
@@ -1172,7 +1282,10 @@ function createMapCard(
           map,
           effect.type,
           effect.label,
-          effect.icon
+          effect.icon,
+          library[
+            effect.type
+          ]
         )
       );
     }
@@ -1182,13 +1295,21 @@ function createMapCard(
       effects
     );
 
-    card.appendChild(body);
+    card.appendChild(
+      body
+    );
   }
 
   return card;
 }
 
-async function render(): Promise<void> {
+
+/* ---------------------------------
+   MAIN RENDER
+---------------------------------- */
+
+async function render():
+  Promise<void> {
   const root =
     document.querySelector<HTMLDivElement>(
       "#app"
@@ -1201,8 +1322,12 @@ async function render(): Promise<void> {
   const maps =
     await getMaps();
 
+  const library =
+    await getAssetLibrary();
+
   root.innerHTML = `
     <main class="panel">
+
       <header class="header">
         <div>
           <h1>
@@ -1210,12 +1335,39 @@ async function render(): Promise<void> {
           </h1>
 
           <p class="subtitle">
-            Map-based weather effects
+            Static map-based weather overlays
           </p>
         </div>
       </header>
 
+      <section class="library-section">
+
+        <button
+          id="library-header"
+          class="section-header-button"
+        >
+          <span class="section-chevron">
+            ${
+              assetsExpanded
+                ? "▾"
+                : "▸"
+            }
+          </span>
+
+          <span>
+            Weather assets
+          </span>
+        </button>
+
+        <div
+          id="asset-list"
+          class="asset-list"
+        ></div>
+
+      </section>
+
       <div class="toolbar">
+
         <div>
           <div class="section-label">
             Maps in scene
@@ -1234,7 +1386,6 @@ async function render(): Promise<void> {
         <select
           id="sort-select"
           class="sort-select"
-          aria-label="Sort maps"
         >
           <option value="NAME_ASC">
             Name A–Z
@@ -1252,6 +1403,7 @@ async function render(): Promise<void> {
             Inactive first
           </option>
         </select>
+
       </div>
 
       <section
@@ -1259,36 +1411,61 @@ async function render(): Promise<void> {
         class="map-list"
       ></section>
 
-      ${
-        maps.length === 0
-          ? `
-            <div class="empty-state">
-              <div class="empty-icon">
-                ▧
-              </div>
-
-              <p>
-                No map images found.
-              </p>
-
-              <span>
-                Add an image to
-                Owlbear's Map layer
-                and it will appear
-                here.
-              </span>
-            </div>
-          `
-          : ""
-      }
-
       <footer class="footer">
-        Rain rendering enabled.
-        Other effects are still
-        placeholders.
+        Static overlays use images from your
+        Owlbear Rodeo asset library.
       </footer>
+
     </main>
   `;
+
+  const libraryHeader =
+    document.querySelector<HTMLButtonElement>(
+      "#library-header"
+    );
+
+  libraryHeader?.addEventListener(
+    "click",
+    async () => {
+      assetsExpanded =
+        !assetsExpanded;
+
+      await render();
+    }
+  );
+
+  const assetList =
+    document.querySelector<HTMLDivElement>(
+      "#asset-list"
+    );
+
+  if (
+    assetList &&
+    assetsExpanded
+  ) {
+    for (
+      const effect of EFFECTS
+    ) {
+      assetList.appendChild(
+        createAssetRow(
+          effect.type,
+          effect.label,
+          effect.icon,
+          library[
+            effect.type
+          ]
+        )
+      );
+    }
+  }
+
+  if (
+    assetList &&
+    !assetsExpanded
+  ) {
+    assetList.style.display =
+      "none";
+  }
 
   const sortSelect =
     document.querySelector<HTMLSelectElement>(
@@ -1303,47 +1480,77 @@ async function render(): Promise<void> {
       "change",
       async () => {
         sortMode =
-          sortSelect.value as SortMode;
+          sortSelect.value as
+            SortMode;
 
         await render();
       }
     );
   }
 
-  const list =
+  const mapList =
     document.querySelector<HTMLDivElement>(
       "#map-list"
     );
 
-  if (list) {
+  if (mapList) {
     for (
       const map of maps
     ) {
-      list.appendChild(
-        createMapCard(map)
+      mapList.appendChild(
+        createMapCard(
+          map,
+          library
+        )
       );
     }
   }
 }
 
-async function refreshEverything(): Promise<void> {
-  await syncWeatherRendering();
-  await render();
+
+/* ---------------------------------
+   REFRESH LOOP
+---------------------------------- */
+
+async function requestRefresh():
+  Promise<void> {
+  if (refreshing) {
+    refreshAgain = true;
+    return;
+  }
+
+  do {
+    refreshAgain = false;
+    refreshing = true;
+
+    try {
+      await syncOverlays();
+      await render();
+    } finally {
+      refreshing = false;
+    }
+  } while (refreshAgain);
 }
 
 OBR.onReady(async () => {
-  await refreshEverything();
+  await requestRefresh();
 
   OBR.scene.items.onChange(
     async () => {
-      await refreshEverything();
+      await requestRefresh();
+    }
+  );
+
+  OBR.scene.onMetadataChange(
+    async () => {
+      await requestRefresh();
     }
   );
 
   OBR.scene.onReadyChange(
     async (ready) => {
       if (ready) {
-        await refreshEverything();
+        await requestRefresh();
       }
     }
   );
