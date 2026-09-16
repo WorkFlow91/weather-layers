@@ -32,103 +32,140 @@ body {
   color: #f4f4f5;
 }
 
-button {
+button,
+select,
+input {
   font: inherit;
 }
 
 .panel {
   display: flex;
   flex-direction: column;
+
   min-height: 500px;
   padding: 18px;
 }
 
 .header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 20px;
+  margin-bottom: 18px;
 }
 
 h1 {
   margin: 0;
+
   font-size: 19px;
-  line-height: 1.2;
   font-weight: 700;
-  letter-spacing: -0.01em;
+  line-height: 1.2;
 }
 
 .subtitle {
   margin: 5px 0 0;
-  color: #a6a7ab;
+
+  color: #9fa1a6;
   font-size: 12px;
 }
 
-.layers-section {
-  flex: 1;
-}
-
-.section-title {
+.toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
 
-  margin-bottom: 8px;
-
-  color: #b8b9bd;
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 
-.layer-count {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+.section-label {
+  color: #b8b9bd;
 
-  min-width: 22px;
-  height: 20px;
-  padding: 0 7px;
+  font-size: 11px;
+  font-weight: 700;
 
-  border-radius: 10px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
 
-  background: #303136;
-  color: #c7c8cc;
+.map-count {
+  margin-top: 2px;
+
+  color: #81838a;
+  font-size: 11px;
+}
+
+.sort-select,
+.weather-select {
+  border: 1px solid #404147;
+  border-radius: 7px;
+
+  background: #292a2e;
+  color: #e8e8e9;
+
+  outline: none;
+}
+
+.sort-select {
+  min-height: 32px;
+  padding: 0 8px;
 
   font-size: 11px;
 }
 
-.layer-list {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
+.weather-select {
+  width: 100%;
+  min-height: 34px;
+
+  padding: 0 9px;
+
+  font-size: 12px;
 }
 
-.layer-row {
+.sort-select:hover,
+.weather-select:hover {
+  border-color: #55565d;
+}
+
+.sort-select:focus,
+.weather-select:focus {
+  border-color: #7167d9;
+}
+
+.map-list {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
 
-  min-height: 44px;
-  padding: 6px 7px 6px 10px;
+  gap: 9px;
+}
 
-  border: 1px solid #35363a;
-  border-radius: 8px;
+.map-card {
+  padding: 10px;
+
+  border: 1px solid #35363b;
+  border-radius: 9px;
 
   background: #292a2e;
 
   transition:
-    background 120ms ease,
-    border-color 120ms ease;
+    border-color 120ms ease,
+    background 120ms ease;
 }
 
-.layer-row:hover {
-  background: #303136;
-  border-color: #45464c;
+.map-card:hover {
+  border-color: #48494f;
 }
 
-.layer-name-area {
+.map-card.weather-active {
+  border-color: #56507e;
+  background: #2d2c35;
+}
+
+.map-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  gap: 10px;
+}
+
+.map-info {
   display: flex;
   align-items: center;
 
@@ -136,67 +173,127 @@ h1 {
   flex: 1;
 }
 
-.layer-icon {
-  width: 26px;
-  flex: 0 0 26px;
-
-  color: #c8c9ce;
-  font-size: 16px;
-}
-
-.layer-name {
-  overflow: hidden;
-
-  color: #eeeeef;
-  font-size: 13px;
-  font-weight: 500;
-
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.layer-controls {
+.map-icon {
   display: flex;
-  align-items: center;
-  gap: 2px;
-
-  margin-left: 8px;
-}
-
-.icon-button {
-  display: inline-flex;
   align-items: center;
   justify-content: center;
 
   width: 30px;
   height: 30px;
 
-  padding: 0;
+  flex: 0 0 30px;
 
-  border: 0;
+  margin-right: 8px;
+
   border-radius: 6px;
 
-  background: transparent;
-  color: #b8b9bd;
+  background: #35363b;
+  color: #c5c6ca;
+
+  font-size: 17px;
+}
+
+.map-text {
+  min-width: 0;
+}
+
+.map-name {
+  overflow: hidden;
+
+  color: #f0f0f1;
+
+  font-size: 13px;
+  font-weight: 600;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.map-state {
+  margin-top: 2px;
+
+  color: #888a91;
+  font-size: 10px;
+
+  text-transform: capitalize;
+}
+
+.toggle-button {
+  min-width: 42px;
+  min-height: 29px;
+
+  padding: 0 9px;
+
+  border: 1px solid #44454b;
+  border-radius: 7px;
+
+  background: #34353a;
+  color: #a6a8ad;
 
   cursor: pointer;
 
-  font-size: 15px;
+  font-size: 11px;
+  font-weight: 650;
 }
 
-.icon-button:hover {
-  background: #3b3c41;
+.toggle-button:hover:not(:disabled) {
+  background: #3d3e44;
   color: #ffffff;
 }
 
-.remove-button {
-  font-size: 21px;
-  line-height: 1;
+.toggle-button.active {
+  border-color: #665ccf;
+
+  background: #5c53bf;
+  color: #ffffff;
 }
 
-.remove-button:hover {
-  background: #493033;
-  color: #ffb9be;
+.toggle-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.map-controls {
+  display: flex;
+  flex-direction: column;
+
+  gap: 9px;
+
+  margin-top: 10px;
+  padding-top: 10px;
+
+  border-top: 1px solid #393a40;
+}
+
+.intensity-row {
+  display: flex;
+  flex-direction: column;
+
+  gap: 5px;
+}
+
+.intensity-header {
+  display: flex;
+  justify-content: space-between;
+
+  color: #aaa;
+  font-size: 10px;
+}
+
+.intensity-value {
+  color: #d0d0d3;
+}
+
+input[type="range"] {
+  width: 100%;
+
+  accent-color: #7167d9;
+  cursor: pointer;
+}
+
+input[type="range"]:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 
 .empty-state {
@@ -204,24 +301,24 @@ h1 {
   flex-direction: column;
   align-items: center;
 
-  margin-top: 38px;
-  padding: 20px;
+  margin-top: 36px;
+  padding: 22px;
 
-  color: #8e9095;
+  color: #85878d;
   text-align: center;
 }
 
 .empty-icon {
-  margin-bottom: 10px;
+  margin-bottom: 9px;
 
-  color: #74767b;
-  font-size: 30px;
+  color: #71737a;
+  font-size: 28px;
 }
 
 .empty-state p {
   margin: 0 0 5px;
 
-  color: #c4c5c8;
+  color: #c5c6ca;
   font-size: 13px;
   font-weight: 600;
 }
@@ -229,52 +326,17 @@ h1 {
 .empty-state span {
   max-width: 230px;
 
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.45;
 }
 
 .footer {
   margin-top: 18px;
-  padding-top: 14px;
+  padding-top: 12px;
 
   border-top: 1px solid #34353a;
-}
 
-.primary-button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-
-  width: 100%;
-  min-height: 40px;
-
-  border: 0;
-  border-radius: 8px;
-
-  background: #6c5ce7;
-  color: #ffffff;
-
-  cursor: pointer;
-
-  font-size: 13px;
-  font-weight: 650;
-
-  transition:
-    filter 120ms ease,
-    transform 80ms ease;
-}
-
-.primary-button:hover {
-  filter: brightness(1.08);
-}
-
-.primary-button:active {
-  transform: translateY(1px);
-}
-
-.button-plus {
-  margin-top: -1px;
-  font-size: 19px;
-  font-weight: 400;
+  color: #777980;
+  font-size: 10px;
+  line-height: 1.4;
 }
