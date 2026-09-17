@@ -1236,8 +1236,6 @@ function createLibraryRow(
   );
 
   return row;
-}
-
 
 /* --------------------------------
    MAIN RENDER
