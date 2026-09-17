@@ -1,5 +1,6 @@
 import OBR, {
   Image,
+  ImageDownload,
   isImage,
 } from "@owlbear-rodeo/sdk";
 
@@ -13,21 +14,8 @@ const EFFECT_LIBRARY_KEY =
 
 type LinkedAsset = {
   name: string;
-
-  image: {
-    width: number;
-    height: number;
-    mime: string;
-    url: string;
-  };
-
-  grid: {
-    dpi: number;
-    offset: {
-      x: number;
-      y: number;
-    };
-  };
+  image: ImageDownload["image"];
+  grid: ImageDownload["grid"];
 };
 
 type EffectDefinition = {
@@ -102,10 +90,6 @@ async function getEffectLibrary():
     return stored;
   }
 
-  /*
-   * First run:
-   * create the default Rain effect.
-   */
   await OBR.room.setMetadata({
     [EFFECT_LIBRARY_KEY]:
       DEFAULT_LIBRARY,
@@ -121,94 +105,6 @@ async function saveEffectLibrary(
     [EFFECT_LIBRARY_KEY]:
       library,
   });
-}
-
-async function linkAsset(
-  effectId: string
-): Promise<void> {
-  /*
-   * Opens Owlbear Rodeo's own image picker.
-   * false = only one image can be selected.
-   */
-  const selected =
-    await OBR.assets.downloadImages(
-      false
-    );
-
-  /*
-   * User closed the picker without choosing.
-   */
-  if (selected.length === 0) {
-    return;
-  }
-
-  const picked =
-    selected[0];
-
-  const library =
-    await getEffectLibrary();
-
-  const effect =
-    library.effects.find(
-      (entry) =>
-        entry.id === effectId
-    );
-
-  if (!effect) {
-    return;
-  }
-
-  const linkedAsset: LinkedAsset = {
-    name: picked.name,
-
-    image: {
-      width:
-        picked.image.width,
-
-      height:
-        picked.image.height,
-
-      mime:
-        picked.image.mime,
-
-      url:
-        picked.image.url,
-    },
-
-    grid: {
-      dpi:
-        picked.grid.dpi,
-
-      offset: {
-        x:
-          picked.grid.offset.x,
-
-        y:
-          picked.grid.offset.y,
-      },
-    },
-  };
-
-  await saveEffectLibrary({
-    version: 1,
-
-    effects:
-      library.effects.map(
-        (entry) =>
-          entry.id === effectId
-            ? {
-                ...entry,
-                asset:
-                  linkedAsset,
-              }
-            : entry
-      ),
-  });
-
-  await OBR.notification.show(
-    `"${picked.name}" linked to ${effect.name}.`,
-    "SUCCESS"
-  );
 }
 
 function createEffectId(
@@ -259,35 +155,6 @@ async function addEffect():
   });
 }
 
-async function unlinkAsset(
-  effectId: string
-): Promise<void> {
-  const library =
-    await getEffectLibrary();
-
-  await saveEffectLibrary({
-    version: 1,
-
-    effects:
-      library.effects.map(
-        (entry) => {
-          if (
-            entry.id !== effectId
-          ) {
-            return entry;
-          }
-
-          const {
-            asset,
-            ...withoutAsset
-          } = entry;
-
-          return withoutAsset;
-        }
-      ),
-  });
-}
-
 async function renameEffect(
   effectId: string
 ): Promise<void> {
@@ -322,7 +189,8 @@ async function renameEffect(
           entry.id === effectId
             ? {
                 ...entry,
-                name: name.trim(),
+                name:
+                  name.trim(),
               }
             : entry
       ),
@@ -369,6 +237,93 @@ async function deleteEffect(
       library.effects.filter(
         (entry) =>
           entry.id !== effectId
+      ),
+  });
+}
+
+async function linkAsset(
+  effectId: string
+): Promise<void> {
+  const selected =
+    await OBR.assets.downloadImages(
+      false
+    );
+
+  if (
+    selected.length === 0
+  ) {
+    return;
+  }
+
+  const picked =
+    selected[0];
+
+  const library =
+    await getEffectLibrary();
+
+  const effect =
+    library.effects.find(
+      (entry) =>
+        entry.id === effectId
+    );
+
+  if (!effect) {
+    return;
+  }
+
+  const linkedAsset:
+    LinkedAsset = {
+    name: picked.name,
+    image: picked.image,
+    grid: picked.grid,
+  };
+
+  await saveEffectLibrary({
+    version: 1,
+    effects:
+      library.effects.map(
+        (entry) =>
+          entry.id === effectId
+            ? {
+                ...entry,
+                asset:
+                  linkedAsset,
+              }
+            : entry
+      ),
+  });
+
+  await OBR.notification.show(
+    `"${picked.name}" linked to ${effect.name}.`,
+    "SUCCESS"
+  );
+}
+
+async function unlinkAsset(
+  effectId: string
+): Promise<void> {
+  const library =
+    await getEffectLibrary();
+
+  await saveEffectLibrary({
+    version: 1,
+    effects:
+      library.effects.map(
+        (entry) => {
+          if (
+            entry.id !==
+            effectId
+          ) {
+            return entry;
+          }
+
+          const {
+            asset,
+            ...withoutAsset
+          } = entry;
+
+          return withoutAsset;
+        }
       ),
   });
 }
@@ -426,7 +381,9 @@ async function updateMapEffect(
     [mapId],
     (items) => {
       for (const item of items) {
-        if (!isImage(item)) {
+        if (
+          !isImage(item)
+        ) {
           continue;
         }
 
@@ -701,10 +658,6 @@ function createMapEffectRow(
     sliderValue.className =
       "opacity-value";
 
-    /*
-     * 0% transparency =
-     * fully opaque.
-     */
     sliderValue.textContent =
       `${Math.round(
         (
@@ -803,7 +756,9 @@ function createMapCard(
   card.className =
     "map-card";
 
-  if (activeCount > 0) {
+  if (
+    activeCount > 0
+  ) {
     card.classList.add(
       "weather-active"
     );
@@ -880,14 +835,18 @@ function createMapCard(
   badge.className =
     "effect-count";
 
-  if (activeCount > 0) {
+  if (
+    activeCount > 0
+  ) {
     badge.classList.add(
       "active"
     );
   }
 
   badge.textContent =
-    String(activeCount);
+    String(
+      activeCount
+    );
 
   header.append(
     chevron,
@@ -1054,7 +1013,6 @@ function createLibraryRow(
     );
 
   rename.type = "button";
-
   rename.className =
     "icon-button";
 
@@ -1078,10 +1036,6 @@ function createLibraryRow(
     rename
   );
 
-  /*
-   * Show an unlink button whenever
-   * an Owlbear asset is connected.
-   */
   if (effect.asset) {
     const unlink =
       document.createElement(
@@ -1154,88 +1108,6 @@ function createLibraryRow(
   return row;
 }
 
-  /*
-   * Deliberately inactive in this
-   * iteration.
-   */
-  link.addEventListener(
-    "click",
-    async () => {
-      await OBR.notification.show(
-        "Asset linking will be added in the next step.",
-        "INFO"
-      );
-    }
-  );
-
-  const rename =
-    document.createElement(
-      "button"
-    );
-
-  rename.type = "button";
-  rename.className =
-    "icon-button";
-
-  rename.title =
-    "Rename";
-
-  rename.textContent =
-    "✎";
-
-  rename.addEventListener(
-    "click",
-    async () => {
-      await renameEffect(
-        effect.id
-      );
-    }
-  );
-
-  controls.append(
-    link,
-    rename
-  );
-
-  if (
-    effect.id !== "rain"
-  ) {
-    const remove =
-      document.createElement(
-        "button"
-      );
-
-    remove.type = "button";
-
-    remove.className =
-      "icon-button danger";
-
-    remove.title =
-      "Delete";
-
-    remove.textContent =
-      "×";
-
-    remove.addEventListener(
-      "click",
-      async () => {
-        await deleteEffect(
-          effect.id
-        );
-      }
-    );
-
-    controls.appendChild(
-      remove
-    );
-  }
-
-  row.append(
-    info,
-    controls
-  );
-
-  return row;
 
 /* --------------------------------
    MAIN RENDER
@@ -1267,6 +1139,7 @@ async function render():
       <header class="app-header">
         <div>
           <h1>Weather Layers</h1>
+
           <p class="subtitle">
             Configure map weather and effect assets
           </p>
@@ -1449,7 +1322,9 @@ async function render():
     );
 
   if (mapList) {
-    if (maps.length === 0) {
+    if (
+      maps.length === 0
+    ) {
       mapList.innerHTML = `
         <div class="empty-state">
           No maps found on the MAP layer.
