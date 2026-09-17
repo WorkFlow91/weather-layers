@@ -64,19 +64,6 @@ type SortMode =
   | "ACTIVE_FIRST"
   | "INACTIVE_FIRST";
 
-type Bounds = {
-  min: {
-    x: number;
-    y: number;
-  };
-  max: {
-    x: number;
-    y: number;
-  };
-  width: number;
-  height: number;
-};
-
 
 /* --------------------------------
    DEFAULT STATE
@@ -678,75 +665,146 @@ async function cleanMapMetadata(
 
 
 /* --------------------------------
-   BOUNDS HELPERS
+   GRID-AWARE GEOMETRY
 -------------------------------- */
 
-async function getMapBounds(
-  mapId: string
-): Promise<Bounds | null> {
-  const bounds =
-    await OBR.scene.items.getItemBounds(
-      [mapId]
-    );
-
-  if (!bounds) {
-    return null;
-  }
-
-  /*
-   * Owlbear's bounds object already
-   * represents the final rendered
-   * item footprint.
-   *
-   * We normalize here to the small
-   * shape the rest of the extension
-   * needs.
-   */
-  return {
-    min: {
-      x: bounds.min.x,
-      y: bounds.min.y,
-    },
-
-    max: {
-      x: bounds.max.x,
-      y: bounds.max.y,
-    },
-
-    width:
-      bounds.width,
-
-    height:
-      bounds.height,
-  };
-}
-
-function getBoundsCenter(
-  bounds: Bounds
+/*
+ * Owlbear stores image size in pixels,
+ * while image.grid.dpi tells us how many
+ * pixels equal one grid cell.
+ *
+ * Combined with the item's scale, this
+ * gives us the displayed size in grid
+ * columns / rows.
+ */
+function getDisplayedGridSize(
+  image: Image
 ) {
-  return {
-    x:
-      bounds.min.x +
-      bounds.width / 2,
+  const baseColumns =
+    image.image.width /
+    image.grid.dpi;
 
-    y:
-      bounds.min.y +
-      bounds.height / 2,
+  const baseRows =
+    image.image.height /
+    image.grid.dpi;
+
+  return {
+    columns:
+      baseColumns *
+      image.scale.x,
+
+    rows:
+      baseRows *
+      image.scale.y,
   };
 }
 
-function getOverlayScaleFromBounds(
-  bounds: Bounds,
+/*
+ * Determine what scale the overlay
+ * requires so that it occupies exactly
+ * the same number of displayed grid
+ * columns and rows as the map.
+ */
+function getOverlayScale(
+  map: Image,
   asset: LinkedAsset
 ) {
+  const mapSize =
+    getDisplayedGridSize(
+      map
+    );
+
+  const assetColumns =
+    asset.image.width /
+    asset.grid.dpi;
+
+  const assetRows =
+    asset.image.height /
+    asset.grid.dpi;
+
   return {
     x:
-      bounds.width /
-      asset.image.width,
+      mapSize.columns /
+      assetColumns,
 
     y:
-      bounds.height /
-      asset.image.height,
+      mapSize.rows /
+      assetRows,
+  };
+}
+
+/*
+ * image.grid.offset describes where the
+ * image's grid is offset relative to the
+ * image itself.
+ *
+ * To align the actual artwork rectangle
+ * rather than the map's shifted grid
+ * alignment point, convert the map's grid
+ * offset into displayed scene-space pixels
+ * and back out that offset.
+ *
+ * This gives us the top-left of the actual
+ * visible map image.
+ */
+function getMapVisualTopLeft(
+  map: Image
+) {
+  const offsetX =
+    map.grid.offset.x *
+    map.scale.x;
+
+  const offsetY =
+    map.grid.offset.y *
+    map.scale.y;
+
+  return {
+    x:
+      map.position.x -
+      offsetX,
+
+    y:
+      map.position.y -
+      offsetY,
+  };
+}
+
+/*
+ * The linked weather asset can have its
+ * own grid offset. We need its final item
+ * position to account for that as well so
+ * its artwork top-left lands exactly on
+ * the map artwork top-left.
+ */
+function getOverlayPosition(
+  map: Image,
+  asset: LinkedAsset,
+  overlayScale: {
+    x: number;
+    y: number;
+  }
+) {
+  const mapTopLeft =
+    getMapVisualTopLeft(
+      map
+    );
+
+  const overlayOffsetX =
+    asset.grid.offset.x *
+    overlayScale.x;
+
+  const overlayOffsetY =
+    asset.grid.offset.y *
+    overlayScale.y;
+
+  return {
+    x:
+      mapTopLeft.x +
+      overlayOffsetX,
+
+    y:
+      mapTopLeft.y +
+      overlayOffsetY,
   };
 }
 
@@ -787,24 +845,17 @@ async function createOverlay(
     return;
   }
 
-  const bounds =
-    await getMapBounds(
-      map.id
-    );
-
-  if (!bounds) {
-    return;
-  }
-
-  const center =
-    getBoundsCenter(
-      bounds
-    );
-
   const scale =
-    getOverlayScaleFromBounds(
-      bounds,
+    getOverlayScale(
+      map,
       effect.asset
+    );
+
+  const position =
+    getOverlayPosition(
+      map,
+      effect.asset,
+      scale
     );
 
   const overlay =
@@ -819,28 +870,29 @@ async function createOverlay(
       )
 
       /*
-       * Use actual rendered map bounds,
-       * not the map's alignment anchor.
+       * Align image artwork top-left
+       * to image artwork top-left.
        */
-      .position(center)
+      .position(
+        position
+      )
 
       /*
-       * Bounds are axis-aligned, so the
-       * weather image itself stays
-       * unrotated in this version.
+       * Match map rotation for now.
+       * For unrotated maps this is 0.
        */
-      .rotation(0)
+      .rotation(
+        map.rotation
+      )
 
       /*
-       * Stretch exactly to the map's
-       * visible bounding rectangle.
+       * Scale in grid-space rather than
+       * raw pixel dimensions.
        */
-      .scale(scale)
+      .scale(
+        scale
+      )
 
-      /*
-       * This already rendered above
-       * tokens in your tests.
-       */
       .layer(
         "ATTACHMENT"
       )
@@ -915,10 +967,10 @@ async function syncOverlays(
       Image[]
     >();
 
+
   /*
-   * First pass:
-   * clean malformed/orphan overlays
-   * before grouping.
+   * Clean malformed and orphaned
+   * overlays first.
    */
   for (
     const overlay of overlays
@@ -983,15 +1035,6 @@ async function syncOverlays(
     const weather =
       getMapWeather(map);
 
-    const bounds =
-      await getMapBounds(
-        map.id
-      );
-
-    if (!bounds) {
-      continue;
-    }
-
     for (
       const effect of
         library.effects
@@ -1015,15 +1058,18 @@ async function syncOverlays(
           effect.id
         );
 
-      wantedKeys.add(key);
+      wantedKeys.add(
+        key
+      );
 
       const matches =
         existing.get(key) ??
         [];
 
+
       /*
-       * Keep only one overlay per
-       * map/effect combination.
+       * Only one overlay per
+       * map/effect pair.
        */
       if (
         matches.length > 1
@@ -1042,8 +1088,9 @@ async function syncOverlays(
       const current =
         matches[0];
 
+
       /*
-       * Nothing exists yet.
+       * No overlay exists yet.
        */
       if (!current) {
         await createOverlay(
@@ -1054,13 +1101,16 @@ async function syncOverlays(
         continue;
       }
 
+
       const metadata =
         getOverlayMetadata(
           current
         );
 
+
       /*
-       * Linked asset changed.
+       * Linked asset changed:
+       * recreate it.
        */
       if (
         metadata?.assetUrl !==
@@ -1079,31 +1129,33 @@ async function syncOverlays(
         continue;
       }
 
+
       /*
-       * Correct asset exists:
-       * synchronize geometry using
-       * the map's actual visible
-       * bounds.
+       * Current asset is correct.
+       * Recalculate its placement and
+       * dimensions from map grid-space.
        */
-      const center =
-        getBoundsCenter(
-          bounds
+      const desiredScale =
+        getOverlayScale(
+          map,
+          effect.asset
         );
 
-      const desiredScale =
-        getOverlayScaleFromBounds(
-          bounds,
-          effect.asset
+      const desiredPosition =
+        getOverlayPosition(
+          map,
+          effect.asset,
+          desiredScale
         );
 
       const needsUpdate =
         Math.abs(
           current.position.x -
-            center.x
+            desiredPosition.x
         ) > 0.01 ||
         Math.abs(
           current.position.y -
-            center.y
+            desiredPosition.y
         ) > 0.01 ||
         Math.abs(
           current.scale.x -
@@ -1113,8 +1165,10 @@ async function syncOverlays(
           current.scale.y -
             desiredScale.y
         ) > 0.0001 ||
-        current.rotation !==
-          0 ||
+        Math.abs(
+          current.rotation -
+            map.rotation
+        ) > 0.001 ||
         current.locked !==
           true ||
         current.disableHit !==
@@ -1133,13 +1187,13 @@ async function syncOverlays(
               ) {
                 item.position = {
                   x:
-                    center.x,
+                    desiredPosition.x,
                   y:
-                    center.y,
+                    desiredPosition.y,
                 };
 
                 item.rotation =
-                  0;
+                  map.rotation;
 
                 item.scale = {
                   x:
@@ -1163,9 +1217,7 @@ async function syncOverlays(
 
   /*
    * Remove overlays which are no
-   * longer wanted because the effect
-   * is disabled, unlinked, deleted,
-   * or the map disappeared.
+   * longer enabled/wanted.
    */
   for (
     const [
@@ -1300,10 +1352,10 @@ function createMapEffectRow(
     top
   );
 
+
   /*
-   * Stored for future opacity work.
-   * Still not visually applied to
-   * static PNGs in this build.
+   * Still stored but not yet applied
+   * visually to static PNG overlays.
    */
   if (
     settings.enabled
@@ -2119,27 +2171,16 @@ async function performRefresh():
   const maps =
     await getRawMaps();
 
-  /*
-   * First remove stale per-map
-   * settings from deleted effects.
-   */
   await cleanMapMetadata(
     maps,
     library
   );
 
-  /*
-   * Then synchronize actual
-   * weather overlays.
-   */
   await syncOverlays(
     maps,
     library
   );
 
-  /*
-   * Finally redraw the extension UI.
-   */
   await render();
 }
 
