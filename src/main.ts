@@ -11,9 +11,29 @@ const MAP_WEATHER_KEY =
 const EFFECT_LIBRARY_KEY =
   "weather-layers/effect-library";
 
+type LinkedAsset = {
+  name: string;
+
+  image: {
+    width: number;
+    height: number;
+    mime: string;
+    url: string;
+  };
+
+  grid: {
+    dpi: number;
+    offset: {
+      x: number;
+      y: number;
+    };
+  };
+};
+
 type EffectDefinition = {
   id: string;
   name: string;
+  asset?: LinkedAsset;
 };
 
 type EffectLibrary = {
@@ -103,6 +123,94 @@ async function saveEffectLibrary(
   });
 }
 
+async function linkAsset(
+  effectId: string
+): Promise<void> {
+  /*
+   * Opens Owlbear Rodeo's own image picker.
+   * false = only one image can be selected.
+   */
+  const selected =
+    await OBR.assets.downloadImages(
+      false
+    );
+
+  /*
+   * User closed the picker without choosing.
+   */
+  if (selected.length === 0) {
+    return;
+  }
+
+  const picked =
+    selected[0];
+
+  const library =
+    await getEffectLibrary();
+
+  const effect =
+    library.effects.find(
+      (entry) =>
+        entry.id === effectId
+    );
+
+  if (!effect) {
+    return;
+  }
+
+  const linkedAsset: LinkedAsset = {
+    name: picked.name,
+
+    image: {
+      width:
+        picked.image.width,
+
+      height:
+        picked.image.height,
+
+      mime:
+        picked.image.mime,
+
+      url:
+        picked.image.url,
+    },
+
+    grid: {
+      dpi:
+        picked.grid.dpi,
+
+      offset: {
+        x:
+          picked.grid.offset.x,
+
+        y:
+          picked.grid.offset.y,
+      },
+    },
+  };
+
+  await saveEffectLibrary({
+    version: 1,
+
+    effects:
+      library.effects.map(
+        (entry) =>
+          entry.id === effectId
+            ? {
+                ...entry,
+                asset:
+                  linkedAsset,
+              }
+            : entry
+      ),
+  });
+
+  await OBR.notification.show(
+    `"${picked.name}" linked to ${effect.name}.`,
+    "SUCCESS"
+  );
+}
+
 function createEffectId(
   name: string
 ): string {
@@ -148,6 +256,35 @@ async function addEffect():
       ...library.effects,
       effect,
     ],
+  });
+}
+
+async function unlinkAsset(
+  effectId: string
+): Promise<void> {
+  const library =
+    await getEffectLibrary();
+
+  await saveEffectLibrary({
+    version: 1,
+
+    effects:
+      library.effects.map(
+        (entry) => {
+          if (
+            entry.id !== effectId
+          ) {
+            return entry;
+          }
+
+          const {
+            asset,
+            ...withoutAsset
+          } = entry;
+
+          return withoutAsset;
+        }
+      ),
   });
 }
 
@@ -860,10 +997,19 @@ function createLibraryRow(
     );
 
   status.className =
-    "library-status";
+    effect.asset
+      ? "library-status linked"
+      : "library-status";
 
   status.textContent =
-    "No asset linked";
+    effect.asset
+      ? effect.asset.name
+      : "No asset linked";
+
+  if (effect.asset) {
+    status.title =
+      effect.asset.name;
+  }
 
   info.append(
     name,
@@ -889,7 +1035,124 @@ function createLibraryRow(
     "small-button primary";
 
   link.textContent =
-    "Link asset";
+    effect.asset
+      ? "Change"
+      : "Link asset";
+
+  link.addEventListener(
+    "click",
+    async () => {
+      await linkAsset(
+        effect.id
+      );
+    }
+  );
+
+  const rename =
+    document.createElement(
+      "button"
+    );
+
+  rename.type = "button";
+
+  rename.className =
+    "icon-button";
+
+  rename.title =
+    "Rename";
+
+  rename.textContent =
+    "✎";
+
+  rename.addEventListener(
+    "click",
+    async () => {
+      await renameEffect(
+        effect.id
+      );
+    }
+  );
+
+  controls.append(
+    link,
+    rename
+  );
+
+  /*
+   * Show an unlink button whenever
+   * an Owlbear asset is connected.
+   */
+  if (effect.asset) {
+    const unlink =
+      document.createElement(
+        "button"
+      );
+
+    unlink.type = "button";
+
+    unlink.className =
+      "icon-button";
+
+    unlink.title =
+      "Unlink asset";
+
+    unlink.textContent =
+      "↗";
+
+    unlink.addEventListener(
+      "click",
+      async () => {
+        await unlinkAsset(
+          effect.id
+        );
+      }
+    );
+
+    controls.appendChild(
+      unlink
+    );
+  }
+
+  if (
+    effect.id !== "rain"
+  ) {
+    const remove =
+      document.createElement(
+        "button"
+      );
+
+    remove.type = "button";
+
+    remove.className =
+      "icon-button danger";
+
+    remove.title =
+      "Delete effect";
+
+    remove.textContent =
+      "×";
+
+    remove.addEventListener(
+      "click",
+      async () => {
+        await deleteEffect(
+          effect.id
+        );
+      }
+    );
+
+    controls.appendChild(
+      remove
+    );
+  }
+
+  row.append(
+    info,
+    controls
+  );
+
+  return row;
+}
 
   /*
    * Deliberately inactive in this
