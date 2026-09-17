@@ -575,3 +575,7 @@ input[type="range"] {
 
   font-size: 10px;
 }
+
+.library-status.linked {
+  color: #a9a4df;
+}
