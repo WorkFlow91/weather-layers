@@ -219,8 +219,7 @@ async function renameEffect(
     effects:
       library.effects.map(
         (entry) =>
-          entry.id ===
-          effectId
+          entry.id === effectId
             ? {
                 ...entry,
                 name:
@@ -273,8 +272,7 @@ async function deleteEffect(
     effects:
       library.effects.filter(
         (entry) =>
-          entry.id !==
-          effectId
+          entry.id !== effectId
       ),
   });
 }
@@ -322,8 +320,7 @@ async function linkAsset(
     effects:
       library.effects.map(
         (entry) =>
-          entry.id ===
-          effectId
+          entry.id === effectId
             ? {
                 ...entry,
                 asset:
@@ -352,8 +349,7 @@ async function unlinkAsset(
       library.effects.map(
         (entry) => {
           if (
-            entry.id !==
-            effectId
+            entry.id !== effectId
           ) {
             return entry;
           }
@@ -458,8 +454,7 @@ async function getRawMaps():
   Promise<Image[]> {
   return await OBR.scene.items.getItems(
     (item): item is Image =>
-      item.layer ===
-        "MAP" &&
+      item.layer === "MAP" &&
       isImage(item)
   );
 }
@@ -651,9 +646,20 @@ async function cleanMapMetadata(
 
 
 /* --------------------------------
-   GRID-AWARE GEOMETRY
+   GEOMETRY
 -------------------------------- */
 
+/*
+ * SIZE:
+ *
+ * Use Owlbear's image grid DPI plus
+ * item scale to determine how many
+ * grid columns / rows the map occupies
+ * on the canvas.
+ *
+ * The image's internal grid offset
+ * deliberately does NOT participate.
+ */
 function getDisplayedGridSize(
   image: Image
 ) {
@@ -676,6 +682,12 @@ function getDisplayedGridSize(
   };
 }
 
+
+/*
+ * Scale the weather PNG until its
+ * displayed width / height matches the
+ * map's displayed columns / rows.
+ */
 function getOverlayScale(
   map: Image,
   asset: LinkedAsset
@@ -704,25 +716,34 @@ function getOverlayScale(
   };
 }
 
+
 /*
- * Final positioning model:
+ * POSITION:
  *
- * Image origin -> image origin.
+ * Use Owlbear's actual rendered
+ * top-left pixel corner.
  *
- * grid.offset is deliberately ignored.
- * It describes grid alignment inside the
- * image, not where the image artwork is
- * placed on the canvas.
+ * getItemBounds().min is documented
+ * as the top-left of the item's
+ * axis-aligned rendered bounding box.
+ *
+ * This makes grid alignment offsets
+ * irrelevant to placement.
  */
-function getOverlayPosition(
-  map: Image
+async function getMapPixelCorner(
+  mapId: string
 ) {
+  const bounds =
+    await OBR.scene.items.getItemBounds(
+      [mapId]
+    );
+
   return {
     x:
-      map.position.x,
+      bounds.min.x,
 
     y:
-      map.position.y,
+      bounds.min.y,
   };
 }
 
@@ -763,15 +784,15 @@ async function createOverlay(
     return;
   }
 
+  const position =
+    await getMapPixelCorner(
+      map.id
+    );
+
   const scale =
     getOverlayScale(
       map,
       effect.asset
-    );
-
-  const position =
-    getOverlayPosition(
-      map
     );
 
   const overlay =
@@ -785,18 +806,34 @@ async function createOverlay(
         )}`
       )
 
+      /*
+       * Pixel-corner to pixel-corner.
+       */
       .position(
         position
       )
 
+      /*
+       * Normal battle maps are generally
+       * unrotated. Matching the map keeps
+       * expected behavior for simple
+       * rotations as well.
+       */
       .rotation(
         map.rotation
       )
 
+      /*
+       * Size remains grid-aware.
+       */
       .scale(
         scale
       )
 
+      /*
+       * ATTACHMENT layer sits above
+       * characters in Owlbear.
+       */
       .layer(
         "ATTACHMENT"
       )
@@ -871,8 +908,8 @@ async function syncOverlays(
 
 
   /*
-   * First remove orphaned or malformed
-   * overlays.
+   * Remove malformed / orphaned
+   * overlays and group valid ones.
    */
   for (
     const overlay of overlays
@@ -948,8 +985,7 @@ async function syncOverlays(
         ];
 
       if (
-        settings?.enabled !==
-          true ||
+        settings?.enabled !== true ||
         !effect.asset
       ) {
         continue;
@@ -971,8 +1007,7 @@ async function syncOverlays(
 
 
       /*
-       * Keep exactly one overlay per
-       * map/effect combination.
+       * One overlay per map/effect.
        */
       if (
         matches.length > 1
@@ -988,12 +1023,13 @@ async function syncOverlays(
           );
       }
 
+
       const current =
         matches[0];
 
 
       /*
-       * Create if none exists.
+       * Create missing overlay.
        */
       if (!current) {
         await createOverlay(
@@ -1012,8 +1048,7 @@ async function syncOverlays(
 
 
       /*
-       * Asset was changed in the
-       * Effect Library.
+       * The linked image changed.
        */
       if (
         metadata?.assetUrl !==
@@ -1033,15 +1068,19 @@ async function syncOverlays(
       }
 
 
+      /*
+       * Existing asset is correct:
+       * synchronize size and placement.
+       */
+      const desiredPosition =
+        await getMapPixelCorner(
+          map.id
+        );
+
       const desiredScale =
         getOverlayScale(
           map,
           effect.asset
-        );
-
-      const desiredPosition =
-        getOverlayPosition(
-          map
         );
 
 
@@ -1050,24 +1089,30 @@ async function syncOverlays(
           current.position.x -
             desiredPosition.x
         ) > 0.01 ||
+
         Math.abs(
           current.position.y -
             desiredPosition.y
         ) > 0.01 ||
+
         Math.abs(
           current.scale.x -
             desiredScale.x
         ) > 0.0001 ||
+
         Math.abs(
           current.scale.y -
             desiredScale.y
         ) > 0.0001 ||
+
         Math.abs(
           current.rotation -
             map.rotation
         ) > 0.001 ||
+
         current.locked !==
           true ||
+
         current.disableHit !==
           true;
 
@@ -1075,47 +1120,48 @@ async function syncOverlays(
       if (
         needsUpdate
       ) {
-        await OBR.scene.items
-          .updateItems(
-            [current.id],
-            (items) => {
-              for (
-                const item of items
-              ) {
-                item.position = {
-                  x:
-                    desiredPosition.x,
-                  y:
-                    desiredPosition.y,
-                };
+        await OBR.scene.items.updateItems(
+          [current.id],
+          (items) => {
+            for (
+              const item of items
+            ) {
+              item.position = {
+                x:
+                  desiredPosition.x,
 
-                item.rotation =
-                  map.rotation;
+                y:
+                  desiredPosition.y,
+              };
 
-                item.scale = {
-                  x:
-                    desiredScale.x,
-                  y:
-                    desiredScale.y,
-                };
+              item.rotation =
+                map.rotation;
 
-                item.locked =
-                  true;
+              item.scale = {
+                x:
+                  desiredScale.x,
 
-                item.disableHit =
-                  true;
-              }
+                y:
+                  desiredScale.y,
+              };
+
+              item.locked =
+                true;
+
+              item.disableHit =
+                true;
             }
-          );
+          }
+        );
       }
     }
   }
 
 
   /*
-   * Remove anything no longer enabled,
-   * linked, valid, or attached to a live
-   * map/effect pair.
+   * Remove overlays whose effect was
+   * disabled/unlinked/deleted or whose
+   * parent map disappeared.
    */
   for (
     const [
