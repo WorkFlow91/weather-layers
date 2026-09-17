@@ -40,7 +40,6 @@ type EffectLibrary = {
 
 type MapEffectSettings = {
   enabled: boolean;
-  opacity: number;
 };
 
 type MapWeatherMetadata = {
@@ -408,7 +407,6 @@ function getEffectSettings(
         effectId
       ] ?? {
       enabled: false,
-      opacity: 1,
     }
   );
 }
@@ -416,8 +414,7 @@ function getEffectSettings(
 async function updateMapEffect(
   mapId: string,
   effectId: string,
-  changes:
-    Partial<MapEffectSettings>
+  enabled: boolean
 ): Promise<void> {
   await OBR.scene.items.updateItems(
     [mapId],
@@ -434,14 +431,6 @@ async function updateMapEffect(
         const weather =
           getMapWeather(item);
 
-        const previous =
-          weather.effects[
-            effectId
-          ] ?? {
-            enabled: false,
-            opacity: 1,
-          };
-
         item.metadata[
           MAP_WEATHER_KEY
         ] = {
@@ -451,8 +440,7 @@ async function updateMapEffect(
             ...weather.effects,
 
             [effectId]: {
-              ...previous,
-              ...changes,
+              enabled,
             },
           },
         } satisfies MapWeatherMetadata;
@@ -611,15 +599,13 @@ async function cleanMapMetadata(
     const weather =
       getMapWeather(map);
 
-    const storedIds =
-      Object.keys(
+    const entries =
+      Object.entries(
         weather.effects
       );
 
-    const cleanedEntries =
-      Object.entries(
-        weather.effects
-      ).filter(
+    const cleaned =
+      entries.filter(
         ([effectId]) =>
           validIds.has(
             effectId
@@ -627,15 +613,15 @@ async function cleanMapMetadata(
       );
 
     if (
-      cleanedEntries.length ===
-      storedIds.length
+      cleaned.length ===
+      entries.length
     ) {
       continue;
     }
 
     const cleanedEffects =
       Object.fromEntries(
-        cleanedEntries
+        cleaned
       );
 
     await OBR.scene.items.updateItems(
@@ -668,15 +654,6 @@ async function cleanMapMetadata(
    GRID-AWARE GEOMETRY
 -------------------------------- */
 
-/*
- * Owlbear stores image size in pixels,
- * while image.grid.dpi tells us how many
- * pixels equal one grid cell.
- *
- * Combined with the item's scale, this
- * gives us the displayed size in grid
- * columns / rows.
- */
 function getDisplayedGridSize(
   image: Image
 ) {
@@ -699,12 +676,6 @@ function getDisplayedGridSize(
   };
 }
 
-/*
- * Determine what scale the overlay
- * requires so that it occupies exactly
- * the same number of displayed grid
- * columns and rows as the map.
- */
 function getOverlayScale(
   map: Image,
   asset: LinkedAsset
@@ -734,83 +705,30 @@ function getOverlayScale(
 }
 
 /*
- * image.grid.offset describes where the
- * image's grid is offset relative to the
- * image itself.
+ * Final positioning model:
  *
- * To align the actual artwork rectangle
- * rather than the map's shifted grid
- * alignment point, convert the map's grid
- * offset into displayed scene-space pixels
- * and back out that offset.
+ * Image origin -> image origin.
  *
- * This gives us the top-left of the actual
- * visible map image.
- */
-function getMapVisualTopLeft(
-  map: Image
-) {
-  const offsetX =
-    map.grid.offset.x *
-    map.scale.x;
-
-  const offsetY =
-    map.grid.offset.y *
-    map.scale.y;
-
-  return {
-    x:
-      map.position.x -
-      offsetX,
-
-    y:
-      map.position.y -
-      offsetY,
-  };
-}
-
-/*
- * The linked weather asset can have its
- * own grid offset. We need its final item
- * position to account for that as well so
- * its artwork top-left lands exactly on
- * the map artwork top-left.
+ * grid.offset is deliberately ignored.
+ * It describes grid alignment inside the
+ * image, not where the image artwork is
+ * placed on the canvas.
  */
 function getOverlayPosition(
-  map: Image,
-  asset: LinkedAsset,
-  overlayScale: {
-    x: number;
-    y: number;
-  }
+  map: Image
 ) {
-  const mapTopLeft =
-    getMapVisualTopLeft(
-      map
-    );
-
-  const overlayOffsetX =
-    asset.grid.offset.x *
-    overlayScale.x;
-
-  const overlayOffsetY =
-    asset.grid.offset.y *
-    overlayScale.y;
-
   return {
     x:
-      mapTopLeft.x +
-      overlayOffsetX,
+      map.position.x,
 
     y:
-      mapTopLeft.y +
-      overlayOffsetY,
+      map.position.y,
   };
 }
 
 
 /* --------------------------------
-   OVERLAY METADATA HELPERS
+   OVERLAY METADATA
 -------------------------------- */
 
 function getOverlayMetadata(
@@ -853,9 +771,7 @@ async function createOverlay(
 
   const position =
     getOverlayPosition(
-      map,
-      effect.asset,
-      scale
+      map
     );
 
   const overlay =
@@ -869,26 +785,14 @@ async function createOverlay(
         )}`
       )
 
-      /*
-       * Align image artwork top-left
-       * to image artwork top-left.
-       */
       .position(
         position
       )
 
-      /*
-       * Match map rotation for now.
-       * For unrotated maps this is 0.
-       */
       .rotation(
         map.rotation
       )
 
-      /*
-       * Scale in grid-space rather than
-       * raw pixel dimensions.
-       */
       .scale(
         scale
       )
@@ -940,13 +844,11 @@ async function syncOverlays(
       )
     );
 
-  const validEffects =
-    new Map(
+  const validEffectIds =
+    new Set(
       library.effects.map(
-        (effect) => [
-          effect.id,
-          effect,
-        ]
+        (effect) =>
+          effect.id
       )
     );
 
@@ -969,8 +871,8 @@ async function syncOverlays(
 
 
   /*
-   * Clean malformed and orphaned
-   * overlays first.
+   * First remove orphaned or malformed
+   * overlays.
    */
   for (
     const overlay of overlays
@@ -993,7 +895,7 @@ async function syncOverlays(
       !validMapIds.has(
         metadata.mapId
       ) ||
-      !validEffects.has(
+      !validEffectIds.has(
         metadata.effectId
       )
     ) {
@@ -1024,6 +926,7 @@ async function syncOverlays(
       group
     );
   }
+
 
   const wantedKeys =
     new Set<string>();
@@ -1068,8 +971,8 @@ async function syncOverlays(
 
 
       /*
-       * Only one overlay per
-       * map/effect pair.
+       * Keep exactly one overlay per
+       * map/effect combination.
        */
       if (
         matches.length > 1
@@ -1090,7 +993,7 @@ async function syncOverlays(
 
 
       /*
-       * No overlay exists yet.
+       * Create if none exists.
        */
       if (!current) {
         await createOverlay(
@@ -1109,8 +1012,8 @@ async function syncOverlays(
 
 
       /*
-       * Linked asset changed:
-       * recreate it.
+       * Asset was changed in the
+       * Effect Library.
        */
       if (
         metadata?.assetUrl !==
@@ -1130,11 +1033,6 @@ async function syncOverlays(
       }
 
 
-      /*
-       * Current asset is correct.
-       * Recalculate its placement and
-       * dimensions from map grid-space.
-       */
       const desiredScale =
         getOverlayScale(
           map,
@@ -1143,10 +1041,9 @@ async function syncOverlays(
 
       const desiredPosition =
         getOverlayPosition(
-          map,
-          effect.asset,
-          desiredScale
+          map
         );
+
 
       const needsUpdate =
         Math.abs(
@@ -1174,6 +1071,7 @@ async function syncOverlays(
         current.disableHit !==
           true;
 
+
       if (
         needsUpdate
       ) {
@@ -1182,8 +1080,7 @@ async function syncOverlays(
             [current.id],
             (items) => {
               for (
-                const item
-                of items
+                const item of items
               ) {
                 item.position = {
                   x:
@@ -1216,8 +1113,9 @@ async function syncOverlays(
 
 
   /*
-   * Remove overlays which are no
-   * longer enabled/wanted.
+   * Remove anything no longer enabled,
+   * linked, valid, or attached to a live
+   * map/effect pair.
    */
   for (
     const [
@@ -1336,10 +1234,7 @@ function createMapEffectRow(
       await updateMapEffect(
         map.id,
         effect.id,
-        {
-          enabled:
-            !settings.enabled,
-        }
+        !settings.enabled
       );
     }
   );
@@ -1351,126 +1246,6 @@ function createMapEffectRow(
   row.appendChild(
     top
   );
-
-
-  /*
-   * Still stored but not yet applied
-   * visually to static PNG overlays.
-   */
-  if (
-    settings.enabled
-  ) {
-    const sliderBlock =
-      document.createElement(
-        "div"
-      );
-
-    sliderBlock.className =
-      "opacity-block";
-
-    const sliderHeader =
-      document.createElement(
-        "div"
-      );
-
-    sliderHeader.className =
-      "opacity-header";
-
-    const sliderLabel =
-      document.createElement(
-        "span"
-      );
-
-    sliderLabel.textContent =
-      "Transparency";
-
-    const sliderValue =
-      document.createElement(
-        "span"
-      );
-
-    sliderValue.className =
-      "opacity-value";
-
-    sliderValue.textContent =
-      `${Math.round(
-        (
-          1 -
-          settings.opacity
-        ) *
-          100
-      )}%`;
-
-    sliderHeader.append(
-      sliderLabel,
-      sliderValue
-    );
-
-    const slider =
-      document.createElement(
-        "input"
-      );
-
-    slider.type =
-      "range";
-
-    slider.min =
-      "0";
-
-    slider.max =
-      "100";
-
-    slider.step =
-      "5";
-
-    slider.value =
-      String(
-        Math.round(
-          (
-            1 -
-            settings.opacity
-          ) *
-            100
-        )
-      );
-
-    slider.addEventListener(
-      "input",
-      () => {
-        sliderValue.textContent =
-          `${slider.value}%`;
-      }
-    );
-
-    slider.addEventListener(
-      "change",
-      async () => {
-        const transparency =
-          Number(
-            slider.value
-          ) / 100;
-
-        await updateMapEffect(
-          map.id,
-          effect.id,
-          {
-            opacity:
-              1 -
-              transparency,
-          }
-        );
-      }
-    );
-
-    sliderBlock.append(
-      sliderHeader,
-      slider
-    );
-
-    row.appendChild(
-      sliderBlock
-    );
-  }
 
   return row;
 }
@@ -1740,6 +1515,7 @@ function createLibraryRow(
   controls.className =
     "library-controls";
 
+
   const link =
     document.createElement(
       "button"
@@ -1764,6 +1540,7 @@ function createLibraryRow(
       );
     }
   );
+
 
   const rename =
     document.createElement(
@@ -1791,10 +1568,12 @@ function createLibraryRow(
     }
   );
 
+
   controls.append(
     link,
     rename
   );
+
 
   if (
     effect.asset
@@ -1830,6 +1609,7 @@ function createLibraryRow(
     );
   }
 
+
   if (
     effect.id !==
     "rain"
@@ -1864,6 +1644,7 @@ function createLibraryRow(
       remove
     );
   }
+
 
   row.append(
     info,
@@ -1901,6 +1682,7 @@ async function render():
       library
     );
 
+
   root.innerHTML = `
     <main class="panel">
 
@@ -1917,6 +1699,7 @@ async function render():
       </header>
 
       <nav class="tabs">
+
         <button
           id="tab-maps"
           class="tab ${
@@ -1940,7 +1723,9 @@ async function render():
         >
           Effect Library
         </button>
+
       </nav>
+
 
       <section
         id="panel-maps"
@@ -1999,6 +1784,7 @@ async function render():
         ></div>
 
       </section>
+
 
       <section
         id="panel-library"
@@ -2183,6 +1969,7 @@ async function performRefresh():
 
   await render();
 }
+
 
 async function requestRefresh():
   Promise<void> {
