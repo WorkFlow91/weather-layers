@@ -1,4 +1,5 @@
 import OBR, {
+  buildImage,
   Image,
   ImageDownload,
   isImage,
@@ -11,6 +12,14 @@ const MAP_WEATHER_KEY =
 
 const EFFECT_LIBRARY_KEY =
   "weather-layers/effect-library";
+
+const OVERLAY_KEY =
+  "weather-layers/static-overlay";
+
+
+/* --------------------------------
+   TYPES
+-------------------------------- */
 
 type LinkedAsset = {
   name: string;
@@ -42,11 +51,23 @@ type MapWeatherMetadata = {
   >;
 };
 
+type OverlayMetadata = {
+  version: 1;
+  mapId: string;
+  effectId: string;
+  assetUrl: string;
+};
+
 type SortMode =
   | "NAME_ASC"
   | "NAME_DESC"
   | "ACTIVE_FIRST"
   | "INACTIVE_FIRST";
+
+
+/* --------------------------------
+   DEFAULT STATE
+-------------------------------- */
 
 const DEFAULT_LIBRARY: EffectLibrary = {
   version: 1,
@@ -70,6 +91,21 @@ const expandedMaps =
 
 
 /* --------------------------------
+   REFRESH CONTROL
+-------------------------------- */
+
+/*
+ * Creating/updating an overlay causes
+ * scene item change events itself.
+ *
+ * This prevents those events from
+ * launching overlapping refreshes.
+ */
+let refreshing = false;
+let refreshAgain = false;
+
+
+/* --------------------------------
    EFFECT LIBRARY
 -------------------------------- */
 
@@ -85,7 +121,9 @@ async function getEffectLibrary():
 
   if (
     stored?.version === 1 &&
-    Array.isArray(stored.effects)
+    Array.isArray(
+      stored.effects
+    )
   ) {
     return stored;
   }
@@ -142,7 +180,9 @@ async function addEffect():
 
   const effect:
     EffectDefinition = {
-    id: createEffectId(name),
+    id: createEffectId(
+      name
+    ),
     name: name.trim(),
   };
 
@@ -183,10 +223,12 @@ async function renameEffect(
 
   await saveEffectLibrary({
     version: 1,
+
     effects:
       library.effects.map(
         (entry) =>
-          entry.id === effectId
+          entry.id ===
+          effectId
             ? {
                 ...entry,
                 name:
@@ -200,7 +242,9 @@ async function renameEffect(
 async function deleteEffect(
   effectId: string
 ): Promise<void> {
-  if (effectId === "rain") {
+  if (
+    effectId === "rain"
+  ) {
     await OBR.notification.show(
       "Rain is the default effect and cannot be deleted.",
       "WARNING"
@@ -233,12 +277,26 @@ async function deleteEffect(
 
   await saveEffectLibrary({
     version: 1,
+
     effects:
       library.effects.filter(
         (entry) =>
-          entry.id !== effectId
+          entry.id !==
+          effectId
       ),
   });
+
+  /*
+   * We don't need to immediately
+   * clean every map's metadata.
+   *
+   * Unknown/deleted effects are now
+   * ignored everywhere, including
+   * active-effect counts.
+   *
+   * syncOverlays() will also remove
+   * any corresponding canvas overlay.
+   */
 }
 
 async function linkAsset(
@@ -280,10 +338,12 @@ async function linkAsset(
 
   await saveEffectLibrary({
     version: 1,
+
     effects:
       library.effects.map(
         (entry) =>
-          entry.id === effectId
+          entry.id ===
+          effectId
             ? {
                 ...entry,
                 asset:
@@ -307,6 +367,7 @@ async function unlinkAsset(
 
   await saveEffectLibrary({
     version: 1,
+
     effects:
       library.effects.map(
         (entry) => {
@@ -380,7 +441,9 @@ async function updateMapEffect(
   await OBR.scene.items.updateItems(
     [mapId],
     (items) => {
-      for (const item of items) {
+      for (
+        const item of items
+      ) {
         if (
           !isImage(item)
         ) {
@@ -402,6 +465,7 @@ async function updateMapEffect(
           MAP_WEATHER_KEY
         ] = {
           version: 1,
+
           effects: {
             ...weather.effects,
 
@@ -418,19 +482,17 @@ async function updateMapEffect(
 
 
 /* --------------------------------
-   MAP DISCOVERY / SORTING
+   MAP DISCOVERY
 -------------------------------- */
 
-async function getMaps():
+async function getRawMaps():
   Promise<Image[]> {
-  const maps =
-    await OBR.scene.items.getItems(
-      (item): item is Image =>
-        item.layer === "MAP" &&
-        isImage(item)
-    );
-
-  return sortMaps(maps);
+  return await OBR.scene.items.getItems(
+    (item): item is Image =>
+      item.layer ===
+        "MAP" &&
+      isImage(item)
+  );
 }
 
 function getMapName(
@@ -442,19 +504,41 @@ function getMapName(
   );
 }
 
+
+/* --------------------------------
+   ACTIVE EFFECTS
+-------------------------------- */
+
+/*
+ * This is the ghost-count bug fix.
+ *
+ * We only count effects that:
+ * 1. still exist in the Effect Library
+ * 2. are enabled on this map
+ */
 function getActiveEffectCount(
-  map: Image
+  map: Image,
+  library: EffectLibrary
 ): number {
-  return Object.values(
-    getMapWeather(map).effects
-  ).filter(
-    (settings) =>
-      settings.enabled
+  const weather =
+    getMapWeather(map);
+
+  return library.effects.filter(
+    (effect) =>
+      weather.effects[
+        effect.id
+      ]?.enabled === true
   ).length;
 }
 
+
+/* --------------------------------
+   MAP SORTING
+-------------------------------- */
+
 function sortMaps(
-  maps: Image[]
+  maps: Image[],
+  library: EffectLibrary
 ): Image[] {
   const sorted = [...maps];
 
@@ -471,10 +555,12 @@ function sortMaps(
         case "ACTIVE_FIRST": {
           const difference =
             getActiveEffectCount(
-              b
+              b,
+              library
             ) -
             getActiveEffectCount(
-              a
+              a,
+              library
             );
 
           if (
@@ -493,10 +579,12 @@ function sortMaps(
         case "INACTIVE_FIRST": {
           const difference =
             getActiveEffectCount(
-              a
+              a,
+              library
             ) -
             getActiveEffectCount(
-              b
+              b,
+              library
             );
 
           if (
@@ -528,7 +616,417 @@ function sortMaps(
 
 
 /* --------------------------------
-   UI: MAP PANEL
+   STATIC OVERLAY GEOMETRY
+-------------------------------- */
+
+/*
+ * We want the weather asset to occupy
+ * exactly the same world dimensions
+ * as the underlying map.
+ *
+ * Example:
+ *
+ * map image width = 4000px
+ * rain image width = 2000px
+ * map scale.x = 0.5
+ *
+ * rain scale.x =
+ *   0.5 * (4000 / 2000)
+ * = 1
+ */
+function getOverlayScale(
+  map: Image,
+  asset: LinkedAsset
+) {
+  return {
+    x:
+      map.scale.x *
+      (
+        map.image.width /
+        asset.image.width
+      ),
+
+    y:
+      map.scale.y *
+      (
+        map.image.height /
+        asset.image.height
+      ),
+  };
+}
+
+function getOverlayMetadata(
+  item: Image
+):
+  | OverlayMetadata
+  | undefined {
+  return item.metadata[
+    OVERLAY_KEY
+  ] as
+    | OverlayMetadata
+    | undefined;
+}
+
+function makeOverlayKey(
+  mapId: string,
+  effectId: string
+): string {
+  return `${mapId}:${effectId}`;
+}
+
+
+/* --------------------------------
+   CREATE STATIC OVERLAY
+-------------------------------- */
+
+async function createOverlay(
+  map: Image,
+  effect: EffectDefinition
+): Promise<void> {
+  if (!effect.asset) {
+    return;
+  }
+
+  const scale =
+    getOverlayScale(
+      map,
+      effect.asset
+    );
+
+  const overlay =
+    buildImage(
+      effect.asset.image,
+      effect.asset.grid
+    )
+      .name(
+        `Weather: ${effect.name} — ${getMapName(
+          map
+        )}`
+      )
+
+      /*
+       * First test:
+       * mirror the map transform
+       * directly.
+       */
+      .position({
+        x: map.position.x,
+        y: map.position.y,
+      })
+
+      .rotation(
+        map.rotation
+      )
+
+      .scale(scale)
+
+      /*
+       * Keep it off the MAP layer so
+       * it won't be mistaken for a map.
+       */
+      .layer(
+        "ATTACHMENT"
+      )
+
+      /*
+       * Essential weather behavior:
+       * visible but not selectable.
+       */
+      .locked(true)
+      .disableHit(true)
+
+      .metadata({
+        [OVERLAY_KEY]: {
+          version: 1,
+
+          mapId:
+            map.id,
+
+          effectId:
+            effect.id,
+
+          assetUrl:
+            effect.asset
+              .image.url,
+        } satisfies OverlayMetadata,
+      })
+
+      .build();
+
+  await OBR.scene.items.addItems(
+    [overlay]
+  );
+}
+
+
+/* --------------------------------
+   STATIC OVERLAY SYNC
+-------------------------------- */
+
+async function syncOverlays(
+  maps: Image[],
+  library: EffectLibrary
+): Promise<void> {
+  /*
+   * Find overlays created by
+   * Weather Layers.
+   */
+  const overlays =
+    await OBR.scene.items.getItems(
+      (item): item is Image =>
+        isImage(item) &&
+        Boolean(
+          item.metadata[
+            OVERLAY_KEY
+          ]
+        )
+    );
+
+  const existing =
+    new Map<
+      string,
+      Image[]
+    >();
+
+  for (
+    const overlay of overlays
+  ) {
+    const metadata =
+      getOverlayMetadata(
+        overlay
+      );
+
+    if (!metadata) {
+      continue;
+    }
+
+    const key =
+      makeOverlayKey(
+        metadata.mapId,
+        metadata.effectId
+      );
+
+    const group =
+      existing.get(key) ??
+      [];
+
+    group.push(overlay);
+
+    existing.set(
+      key,
+      group
+    );
+  }
+
+  const wantedKeys =
+    new Set<string>();
+
+
+  /*
+   * Work out which overlays should
+   * exist.
+   */
+  for (
+    const map of maps
+  ) {
+    const weather =
+      getMapWeather(map);
+
+    for (
+      const effect of
+        library.effects
+    ) {
+      const settings =
+        weather.effects[
+          effect.id
+        ];
+
+      /*
+       * Only render when:
+       *
+       * - effect exists
+       * - effect is enabled
+       * - asset is linked
+       */
+      if (
+        settings?.enabled !==
+          true ||
+        !effect.asset
+      ) {
+        continue;
+      }
+
+      const key =
+        makeOverlayKey(
+          map.id,
+          effect.id
+        );
+
+      wantedKeys.add(key);
+
+      const matches =
+        existing.get(key) ??
+        [];
+
+      /*
+       * If there are accidental
+       * duplicates, keep the first
+       * and remove the others.
+       */
+      if (
+        matches.length > 1
+      ) {
+        await OBR.scene.items
+          .deleteItems(
+            matches
+              .slice(1)
+              .map(
+                (item) =>
+                  item.id
+              )
+          );
+      }
+
+      const current =
+        matches[0];
+
+      /*
+       * No overlay yet.
+       */
+      if (!current) {
+        await createOverlay(
+          map,
+          effect
+        );
+
+        continue;
+      }
+
+      const metadata =
+        getOverlayMetadata(
+          current
+        );
+
+      /*
+       * Linked asset changed.
+       *
+       * Simplest and safest:
+       * delete and recreate.
+       */
+      if (
+        metadata?.assetUrl !==
+        effect.asset.image.url
+      ) {
+        await OBR.scene.items
+          .deleteItems([
+            current.id,
+          ]);
+
+        await createOverlay(
+          map,
+          effect
+        );
+
+        continue;
+      }
+
+      /*
+       * Existing asset is correct.
+       *
+       * Keep its transform synced
+       * with the map.
+       */
+      const desiredScale =
+        getOverlayScale(
+          map,
+          effect.asset
+        );
+
+      const needsUpdate =
+        current.position.x !==
+          map.position.x ||
+        current.position.y !==
+          map.position.y ||
+        current.rotation !==
+          map.rotation ||
+        current.scale.x !==
+          desiredScale.x ||
+        current.scale.y !==
+          desiredScale.y ||
+        current.locked !==
+          true ||
+        current.disableHit !==
+          true;
+
+      if (needsUpdate) {
+        await OBR.scene.items
+          .updateItems(
+            [current.id],
+            (items) => {
+              for (
+                const item
+                of items
+              ) {
+                item.position = {
+                  x:
+                    map.position.x,
+                  y:
+                    map.position.y,
+                };
+
+                item.rotation =
+                  map.rotation;
+
+                item.scale = {
+                  ...desiredScale,
+                };
+
+                item.locked =
+                  true;
+
+                item.disableHit =
+                  true;
+              }
+            }
+          );
+      }
+    }
+  }
+
+
+  /*
+   * Remove overlays which:
+   *
+   * - were disabled
+   * - lost their linked asset
+   * - belong to deleted effects
+   * - belong to maps no longer present
+   */
+  for (
+    const [
+      key,
+      items,
+    ] of existing
+  ) {
+    if (
+      wantedKeys.has(key)
+    ) {
+      continue;
+    }
+
+    await OBR.scene.items
+      .deleteItems(
+        items.map(
+          (item) =>
+            item.id
+        )
+      );
+  }
+}
+
+
+/* --------------------------------
+   UI: MAP EFFECT ROW
 -------------------------------- */
 
 function createMapEffectRow(
@@ -549,7 +1047,9 @@ function createMapEffectRow(
   row.className =
     "map-effect-row";
 
-  if (settings.enabled) {
+  if (
+    settings.enabled
+  ) {
     row.classList.add(
       "enabled"
     );
@@ -568,11 +1068,15 @@ function createMapEffectRow(
       "button"
     );
 
-  toggle.type = "button";
+  toggle.type =
+    "button";
+
   toggle.className =
     "effect-toggle";
 
-  if (settings.enabled) {
+  if (
+    settings.enabled
+  ) {
     toggle.classList.add(
       "active"
     );
@@ -610,6 +1114,14 @@ function createMapEffectRow(
   toggle.addEventListener(
     "click",
     async () => {
+      /*
+       * Allow storing an enabled
+       * state even if no asset is
+       * currently linked.
+       *
+       * Nothing will render until
+       * an asset exists.
+       */
       await updateMapEffect(
         map.id,
         effect.id,
@@ -621,11 +1133,24 @@ function createMapEffectRow(
     }
   );
 
-  top.appendChild(toggle);
+  top.appendChild(
+    toggle
+  );
 
   row.appendChild(top);
 
-  if (settings.enabled) {
+
+  /*
+   * Keep transparency UI unchanged
+   * for now.
+   *
+   * The value is stored but is NOT
+   * applied to the static image in
+   * this build.
+   */
+  if (
+    settings.enabled
+  ) {
     const sliderBlock =
       document.createElement(
         "div"
@@ -677,10 +1202,17 @@ function createMapEffectRow(
         "input"
       );
 
-    slider.type = "range";
-    slider.min = "0";
-    slider.max = "100";
-    slider.step = "5";
+    slider.type =
+      "range";
+
+    slider.min =
+      "0";
+
+    slider.max =
+      "100";
+
+    slider.step =
+      "5";
 
     slider.value =
       String(
@@ -734,6 +1266,11 @@ function createMapEffectRow(
   return row;
 }
 
+
+/* --------------------------------
+   UI: MAP CARD
+-------------------------------- */
+
 function createMapCard(
   map: Image,
   library: EffectLibrary
@@ -745,7 +1282,8 @@ function createMapCard(
 
   const activeCount =
     getActiveEffectCount(
-      map
+      map,
+      library
     );
 
   const card =
@@ -769,7 +1307,9 @@ function createMapCard(
       "button"
     );
 
-  header.type = "button";
+  header.type =
+    "button";
+
   header.className =
     "map-header";
 
@@ -875,7 +1415,9 @@ function createMapCard(
     }
   );
 
-  card.appendChild(header);
+  card.appendChild(
+    header
+  );
 
   if (expanded) {
     const body =
@@ -909,7 +1451,9 @@ function createMapCard(
       }
     }
 
-    card.appendChild(body);
+    card.appendChild(
+      body
+    );
   }
 
   return card;
@@ -917,7 +1461,7 @@ function createMapCard(
 
 
 /* --------------------------------
-   UI: LIBRARY PANEL
+   UI: LIBRARY ROW
 -------------------------------- */
 
 function createLibraryRow(
@@ -965,7 +1509,9 @@ function createLibraryRow(
       ? effect.asset.name
       : "No asset linked";
 
-  if (effect.asset) {
+  if (
+    effect.asset
+  ) {
     status.title =
       effect.asset.name;
   }
@@ -988,7 +1534,8 @@ function createLibraryRow(
       "button"
     );
 
-  link.type = "button";
+  link.type =
+    "button";
 
   link.className =
     "small-button primary";
@@ -1012,7 +1559,9 @@ function createLibraryRow(
       "button"
     );
 
-  rename.type = "button";
+  rename.type =
+    "button";
+
   rename.className =
     "icon-button";
 
@@ -1036,13 +1585,16 @@ function createLibraryRow(
     rename
   );
 
-  if (effect.asset) {
+  if (
+    effect.asset
+  ) {
     const unlink =
       document.createElement(
         "button"
       );
 
-    unlink.type = "button";
+    unlink.type =
+      "button";
 
     unlink.className =
       "icon-button";
@@ -1075,7 +1627,8 @@ function createLibraryRow(
         "button"
       );
 
-    remove.type = "button";
+    remove.type =
+      "button";
 
     remove.className =
       "icon-button danger";
@@ -1110,7 +1663,7 @@ function createLibraryRow(
 
 
 /* --------------------------------
-   MAIN RENDER
+   MAIN UI RENDER
 -------------------------------- */
 
 async function render():
@@ -1124,21 +1677,32 @@ async function render():
     return;
   }
 
-  const [
-    maps,
-    library,
-  ] =
-    await Promise.all([
-      getMaps(),
-      getEffectLibrary(),
-    ]);
+  /*
+   * Library first, because the
+   * active-count bug fix and sorting
+   * depend on knowing which effects
+   * currently exist.
+   */
+  const library =
+    await getEffectLibrary();
+
+  const rawMaps =
+    await getRawMaps();
+
+  const maps =
+    sortMaps(
+      rawMaps,
+      library
+    );
 
   root.innerHTML = `
     <main class="panel">
 
       <header class="app-header">
         <div>
-          <h1>Weather Layers</h1>
+          <h1>
+            Weather Layers
+          </h1>
 
           <p class="subtitle">
             Configure map weather and effect assets
@@ -1183,6 +1747,7 @@ async function render():
       >
 
         <div class="toolbar">
+
           <div>
             <div class="section-label">
               Maps in scene
@@ -1219,6 +1784,7 @@ async function render():
               Inactive first
             </option>
           </select>
+
         </div>
 
         <div
@@ -1239,6 +1805,7 @@ async function render():
       >
 
         <div class="panel-heading">
+
           <div>
             <div class="section-label">
               Weather effects
@@ -1255,6 +1822,7 @@ async function render():
           >
             + Add effect
           </button>
+
         </div>
 
         <div
@@ -1266,6 +1834,7 @@ async function render():
 
     </main>
   `;
+
 
   document
     .querySelector(
@@ -1281,6 +1850,7 @@ async function render():
       }
     );
 
+
   document
     .querySelector(
       "#tab-library"
@@ -1295,12 +1865,15 @@ async function render():
       }
     );
 
+
   const sortSelect =
     document.querySelector<HTMLSelectElement>(
       "#sort-select"
     );
 
-  if (sortSelect) {
+  if (
+    sortSelect
+  ) {
     sortSelect.value =
       sortMode;
 
@@ -1316,12 +1889,15 @@ async function render():
     );
   }
 
+
   const mapList =
     document.querySelector<HTMLDivElement>(
       "#map-list"
     );
 
-  if (mapList) {
+  if (
+    mapList
+  ) {
     if (
       maps.length === 0
     ) {
@@ -1344,6 +1920,7 @@ async function render():
     }
   }
 
+
   document
     .querySelector(
       "#add-effect"
@@ -1353,12 +1930,15 @@ async function render():
       addEffect
     );
 
+
   const libraryList =
     document.querySelector<HTMLDivElement>(
       "#library-list"
     );
 
-  if (libraryList) {
+  if (
+    libraryList
+  ) {
     for (
       const effect of
         library.effects
@@ -1374,29 +1954,80 @@ async function render():
 
 
 /* --------------------------------
+   FULL REFRESH
+-------------------------------- */
+
+async function performRefresh():
+  Promise<void> {
+  const library =
+    await getEffectLibrary();
+
+  const maps =
+    await getRawMaps();
+
+  /*
+   * First synchronize actual
+   * weather images.
+   */
+  await syncOverlays(
+    maps,
+    library
+  );
+
+  /*
+   * Then redraw the extension UI.
+   */
+  await render();
+}
+
+async function requestRefresh():
+  Promise<void> {
+  if (refreshing) {
+    refreshAgain = true;
+    return;
+  }
+
+  do {
+    refreshAgain = false;
+    refreshing = true;
+
+    try {
+      await performRefresh();
+    } finally {
+      refreshing = false;
+    }
+  } while (
+    refreshAgain
+  );
+}
+
+
+/* --------------------------------
    STARTUP
 -------------------------------- */
 
-OBR.onReady(async () => {
-  await render();
+OBR.onReady(
+  async () => {
+    await requestRefresh();
 
-  OBR.scene.items.onChange(
-    async () => {
-      await render();
-    }
-  );
-
-  OBR.room.onMetadataChange(
-    async () => {
-      await render();
-    }
-  );
-
-  OBR.scene.onReadyChange(
-    async (ready) => {
-      if (ready) {
-        await render();
+    OBR.scene.items.onChange(
+      async () => {
+        await requestRefresh();
       }
-    }
-  );
-});
+    );
+
+    OBR.room.onMetadataChange(
+      async () => {
+        await requestRefresh();
+      }
+    );
+
+    OBR.scene.onReadyChange(
+      async (ready) => {
+        if (ready) {
+          await requestRefresh();
+        }
+      }
+    );
+  }
+);
